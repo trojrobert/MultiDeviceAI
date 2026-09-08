@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# uv
+.uv/
+uv.lock
+
+# exo checkout (vendored at runtime, not committed)
+vendor/
+
+# OS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+
+# Logs / local state
+*.log
+.mdllm/
