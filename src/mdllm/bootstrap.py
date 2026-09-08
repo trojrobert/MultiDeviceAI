@@ -132,6 +132,8 @@ def build_commands() -> list[str]:
     ]
 
 
-def run_command(worker: bool = True) -> str:
+def run_command(worker: bool = True, namespace: str | None = None) -> str:
     flag = "" if worker else " --no-worker"
-    return f"cd {config.EXO_DIR} && uv run exo{flag}"
+    # A "room" maps to exo's libp2p namespace so only same-room devices cluster.
+    prefix = f"EXO_LIBP2P_NAMESPACE={namespace} " if namespace else ""
+    return f"cd {config.EXO_DIR} && {prefix}uv run exo{flag}"

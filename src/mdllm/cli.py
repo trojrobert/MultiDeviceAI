@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from . import __version__, bootstrap, config
+from . import __version__, bootstrap, config, room
 from .client import ExoClient, ExoNotRunning, Placement
 from .planner import best_placement, human_bytes, rank_placements, valid_placements
 
@@ -30,6 +30,11 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Run one LLM across your phone, laptop, and more by pooling their memory.",
 )
+room_app = typer.Typer(
+    no_args_is_help=True,
+    help="Create/join a shareable swarm 'room' (isolates your cluster).",
+)
+app.add_typer(room_app, name="room")
 console = Console()
 
 
@@ -101,6 +106,10 @@ def bootstrap_cmd(
 
 @app.command()
 def up(
+    room_code: str = typer.Option(
+        None, "--room", "-r",
+        help="Join this swarm room (defaults to the saved room, if any).",
+    ),
     worker: bool = typer.Option(
         True, "--worker/--no-worker",
         help="Run inference here (--worker) or act as a coordinator only.",
@@ -111,10 +120,21 @@ def up(
     if not config.EXO_DIR.exists():
         console.print("[red]exo is not installed.[/red] Run [bold]mdllm bootstrap[/bold] first.")
         raise typer.Exit(1)
-    cmd = bootstrap.run_command(worker=worker)
+    active_room = room.resolve_room(room_code)
+    if room_code and not room.is_valid(room_code):
+        console.print(f"[red]Invalid room code:[/red] {room_code}")
+        raise typer.Exit(1)
+    cmd = bootstrap.run_command(worker=worker, namespace=active_room)
+    room_line = (
+        f"Room: [bold]{active_room}[/bold] (only same-room devices will join)\n"
+        if active_room
+        else "Room: [dim]none[/dim] — clustering with any exo device on the LAN.\n"
+        "Tip: run [bold]mdllm room new[/bold] to isolate your own swarm.\n"
+    )
     console.print(Panel(
-        "Starting exo. Other devices on the same network will auto-discover "
-        "this node.\nDashboard + API: [bold]http://localhost:52415[/bold]\n"
+        room_line
+        + "Other devices in the same room auto-discover this node.\n"
+        "Dashboard + API: [bold]http://localhost:52415[/bold]\n"
         "Press Ctrl-C to leave the cluster.",
         title="mdllm up",
     ))
@@ -125,6 +145,56 @@ def up(
         subprocess.call(cmd, shell=True)
     except KeyboardInterrupt:
         console.print("\n[yellow]Left the cluster.[/yellow]")
+
+
+@room_app.command("new")
+def room_new(
+    code: str = typer.Argument(None, help="Custom code (default: auto-generated)."),
+) -> None:
+    """Create a new swarm room and make it the active room on this device."""
+    code = code or room.generate_code()
+    if not room.is_valid(code):
+        console.print(f"[red]Invalid room code:[/red] {code}")
+        raise typer.Exit(1)
+    room.save_room(code)
+    console.print(Panel(
+        f"Room code: [bold green]{code}[/bold green]\n\n"
+        "Share this code with your other devices. On each one, run:\n"
+        f"  [bold]mdllm up --room {code}[/bold]\n\n"
+        "Only devices using this exact code will join your swarm.",
+        title="swarm room created",
+    ))
+
+
+@room_app.command("show")
+def room_show() -> None:
+    """Show the active room on this device."""
+    active = room.resolve_room()
+    if active:
+        console.print(f"Active room: [bold green]{active}[/bold green]")
+        console.print(f"Have another device join with: [bold]mdllm up --room {active}[/bold]")
+    else:
+        console.print("[dim]No room set. Create one with [bold]mdllm room new[/bold].[/dim]")
+
+
+@room_app.command("join")
+def room_join(code: str = typer.Argument(..., help="Room code to join.")) -> None:
+    """Save a room code shared with you (then run `mdllm up` to join)."""
+    if not room.is_valid(code):
+        console.print(f"[red]Invalid room code:[/red] {code}")
+        raise typer.Exit(1)
+    room.save_room(code)
+    console.print(
+        f"Saved room [bold green]{code}[/bold green]. "
+        f"Start this device with [bold]mdllm up[/bold]."
+    )
+
+
+@room_app.command("clear")
+def room_clear() -> None:
+    """Forget the saved room (this device goes back to open LAN clustering)."""
+    room.clear_room()
+    console.print("Room cleared.")
 
 
 @app.command()
