@@ -1,25 +1,8 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-.env
-
-# uv
-.uv/
-uv.lock
-
-# exo checkout (vendored at runtime, not committed)
-vendor/
-
-# OS
+node_modules/
+dist/
 .DS_Store
-
-# Editor
-.idea/
-.vscode/
-
-# Logs / local state
 *.log
-.mdllm/
+
+# Cached model weights pulled at runtime
+models/
+*.gguf

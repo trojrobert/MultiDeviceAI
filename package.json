@@ -1,0 +1,27 @@
+{
+  "name": "multideviceai",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "A peer-to-peer WebGPU inference engine, layer-split across devices over WebRTC. Built from scratch.",
+  "scripts": {
+    "dev": "vite",
+    "dev:lan": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "typecheck": "tsc --noEmit",
+    "test": "NODE_OPTIONS=--experimental-strip-types node --test \"tests/**/*.test.ts\"",
+    "test:e2e": "node tests/e2e/room.mjs",
+    "verify": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "peerjs": "^1.5.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@webgpu/types": "^0.1.51",
+    "playwright": "^1.49.1",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}
