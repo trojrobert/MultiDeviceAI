@@ -1,6 +1,5 @@
 /*
- * Adapted from SwarmLLM engine/gguf.js.
- * Copyright (c) 2026 Nehanth Narendrula. MIT License.
+ * GGUF model loading and tensor indexing.
  */
 
 import { float16ToFloat32, repackQ8, Q8_BLOCK_BYTES, Q8_BLOCK_SIZE } from "./quant.ts";

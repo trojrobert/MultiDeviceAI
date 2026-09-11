@@ -1,6 +1,5 @@
 /*
- * Adapted from SwarmLLM engine/sampling.js.
- * Copyright (c) 2026 Nehanth Narendrula. MIT License.
+ * Sampling utilities for the dense Qwen engine.
  */
 
 export function greedySample(logits: ArrayLike<number>): number {

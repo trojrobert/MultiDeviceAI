@@ -1,6 +1,5 @@
 /*
- * Adapted from SwarmLLM engine/tokenizer.js.
- * Copyright (c) 2026 Nehanth Narendrula. MIT License.
+ * BPE tokenizer for the Qwen model.
  */
 
 export interface TokenizerDefinition {

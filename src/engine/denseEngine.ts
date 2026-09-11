@@ -1,6 +1,5 @@
 /*
- * Adapted from SwarmLLM engine/dense.js.
- * Copyright (c) 2026 Nehanth Narendrula. MIT License.
+ * Dense Qwen WebGPU inference engine.
  */
 
 import { createInitializedBuffer, destroyBuffers, readFloatBuffer } from "./buffers.ts";

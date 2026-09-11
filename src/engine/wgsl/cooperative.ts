@@ -1,6 +1,5 @@
 /*
- * Adapted from SwarmLLM engine/wgsl/coop.js.
- * Copyright (c) 2026 Nehanth Narendrula. MIT License.
+ * Cooperative Q8 matmul WGSL kernel.
  */
 
 export function cooperativeQ8WGSL(workgroupSize = 256, rowsPerGroup = 4): string {

@@ -1,6 +1,5 @@
 /*
- * Adapted from SwarmLLM engine/wgsl/base.js.
- * Copyright (c) 2026 Nehanth Narendrula. MIT License.
+ * Base WGSL kernels for the dense Qwen engine.
  */
 
 export const BASE_WGSL = /* wgsl */ `

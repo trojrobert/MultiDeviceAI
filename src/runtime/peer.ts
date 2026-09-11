@@ -1,9 +1,7 @@
 /**
  * Two-peer PeerJS transport.
  *
- * Room-code addressing and reliable PeerJS connections are adapted from the
- * MIT-licensed SwarmLLM room implementation:
- * https://github.com/Nehanth/swarmllm
+ * Provides room-code addressing and reliable PeerJS connections.
  */
 import Peer, {
   type DataConnection,

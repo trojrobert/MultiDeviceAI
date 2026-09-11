@@ -120,7 +120,7 @@ prove that 0.6B needs pooled memory.
   - Durable description of engine/room boundaries and generation protocol.
 - `[MODIFY] README.md`
   - POC setup, HTTPS requirement, two-device testing instructions, architecture,
-    model download size, limitations, and SwarmLLM attribution.
+    model download size, and limitations.
 
 ## Correctness gates
 
@@ -132,14 +132,6 @@ prove that 0.6B needs pooled memory.
 5. Real Qwen3 0.6B local single-device logits match a known golden fixture.
 6. Two browser contexts complete model load and produce a deterministic response.
 7. Typecheck, unit tests, production build, and browser end-to-end smoke test pass.
-
-## Reference policy
-
-SwarmLLM is the architectural reference for GGUF tensor mapping, Q8_0 layout,
-WebGPU kernels, split-engine boundaries, and WebRTC orchestration. Any directly
-adapted MIT-licensed implementation will retain attribution in source headers
-and the project documentation. The POC will remain a focused TypeScript
-implementation rather than importing SwarmLLM as a runtime dependency.
 
 ## Testing on phone and laptop
 

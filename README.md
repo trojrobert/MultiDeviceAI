@@ -111,13 +111,6 @@ real hardware.
 - No TURN credentials are bundled.
 - Activations are sent as exact f32 for correctness, not compressed f16.
 
-## Attribution
-
-The architecture and adapted engine/room implementation are based on
-[SwarmLLM](https://github.com/Nehanth/swarmllm), copyright Nehanth Narendrula
-and contributors, under the MIT License. See `THIRD_PARTY_NOTICES.md`.
-
 ## License
 
-Apache-2.0 for original MultiDeviceAI code; adapted SwarmLLM portions remain
-subject to the MIT notice in `THIRD_PARTY_NOTICES.md`.
+Apache-2.0 for MultiDeviceAI code.

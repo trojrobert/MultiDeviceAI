@@ -87,9 +87,3 @@ room peer.
 - Generation starts with greedy sampling for deterministic comparison.
 - Performance work begins only after real-model golden correctness.
 
-## Reference and attribution
-
-The architecture and portions of the implementation are adapted from
-[SwarmLLM](https://github.com/Nehanth/swarmllm), licensed under MIT by Nehanth
-Narendrula and contributors. Adapted source files retain attribution headers.
-

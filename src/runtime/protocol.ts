@@ -1,9 +1,8 @@
 /**
  * Room control and activation protocol for the two-peer POC.
  *
- * The binary framing is original to MultiDeviceAI. The separation between
- * control messages and activation frames follows the MIT-licensed SwarmLLM
- * room transport: https://github.com/Nehanth/swarmllm
+ * The binary framing is original to MultiDeviceAI, with a separation between
+ * control messages and activation frames.
  */
 
 export const PROTOCOL_VERSION = 1 as const;

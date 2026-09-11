@@ -1,6 +1,5 @@
 /*
- * Adapted from SwarmLLM engine/gguf.js and engine/quant.js.
- * Copyright (c) 2026 Nehanth Narendrula. MIT License.
+ * Q8_0 quantization and dequantization helpers.
  */
 
 import type { Q8Weight, TensorInfo } from "./types.ts";

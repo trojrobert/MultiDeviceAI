@@ -1,7 +1,6 @@
 /*
  * Runtime adapter connecting MultiDeviceAI's room contract to the dense Qwen
- * engine. Core model code is adapted from SwarmLLM (MIT); see
- * THIRD_PARTY_NOTICES.md.
+ * engine.
  */
 
 import {
@@ -141,7 +140,7 @@ export class QwenRuntimeAdapter implements DistributedEngine {
       }));
     let prompt = tokenizer.applyChatTemplate(messages, true);
     // Qwen3 defaults to a visible thinking block. Pre-closing it gives this
-    // first POC concise answers and mirrors SwarmLLM's deterministic room path.
+    // first POC concise answers via a deterministic room path.
     if (
       tokenizer.tokenId("<think>") !== undefined &&
       tokenizer.tokenId("</think>") !== undefined
