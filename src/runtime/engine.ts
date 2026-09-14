@@ -1,3 +1,5 @@
+import type { ModelEntry, ModelProfile } from "../engine/model.ts";
+import { describeAdapter } from "./capabilities.ts";
 import type {
   DeviceCapabilities,
   LayerAssignment,
@@ -25,8 +27,16 @@ export interface GenerationOptions {
  * Host-only methods may throw when called on a worker assignment.
  */
 export interface DistributedEngine {
-  readonly layerCount: number;
-  readonly modelId: string;
+  /** Models this build can load. */
+  readonly catalogue: readonly ModelEntry[];
+  /** Profile of the model currently selected, once `probeModel` has run. */
+  readonly activeProfile?: ModelProfile;
+  /**
+   * Range-fetch a model's GGUF header and derive its real shape and byte
+   * layout. Layer count and hidden size vary per model, so nothing may assume
+   * them before this resolves.
+   */
+  probeModel(modelId: string, signal?: AbortSignal): Promise<ModelProfile>;
   getCapabilities(label: string): Promise<DeviceCapabilities>;
   load(options: EngineLoadOptions): Promise<void>;
   tokenize?(transcript: readonly TranscriptEntry[]): Promise<Int32Array>;
@@ -63,25 +73,5 @@ export function resolveEngineFactory(): EngineFactory | undefined {
 export async function probeCapabilities(
   label: string,
 ): Promise<DeviceCapabilities> {
-  const capabilities: DeviceCapabilities = {
-    label,
-    userAgent: navigator.userAgent,
-    webgpu: "gpu" in navigator,
-    maxBufferSize: 0,
-  };
-  if (!navigator.gpu) return capabilities;
-  try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) return capabilities;
-    const info = adapter.info;
-    capabilities.gpu =
-      [info.vendor, info.architecture, info.device]
-        .filter(Boolean)
-        .join(" · ") || "WebGPU adapter";
-    capabilities.maxBufferSize = adapter.limits.maxBufferSize;
-    capabilities.estimatedMemoryBytes = adapter.limits.maxBufferSize;
-  } catch {
-    capabilities.webgpu = false;
-  }
-  return capabilities;
+  return describeAdapter(label);
 }

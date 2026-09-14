@@ -3,11 +3,13 @@
  */
 
 import { createInitializedBuffer, destroyBuffers, readFloatBuffer } from "./buffers.ts";
+import { planHeadChunks, sliceQ8Rows } from "./headChunks.ts";
 import { dequantizeQ8Row } from "./quant.ts";
 import type {
   F32Weight,
   ModelRole,
   ModelWeights,
+  Q8Weight,
   Qwen3Config,
   SplitEngine,
   Weight,
@@ -41,6 +43,9 @@ interface GPUQ8Weight {
 }
 
 type GPUWeight = GPUF32Weight | GPUQ8Weight;
+
+/** A bind-group entry, optionally narrowed to a slice of a larger buffer. */
+type BindEntry = GPUBuffer | { buffer: GPUBuffer; offset: number; size: number };
 
 interface MatvecOperation {
   pipeline: PipelineName;
@@ -137,7 +142,7 @@ export class DenseQwen3Engine implements SplitEngine {
   private siluGroup!: GPUBindGroup;
   private residualGroup!: GPUBindGroup;
   private finalNormGroup?: GPUBindGroup;
-  private headOperation?: MatvecOperation;
+  private headOperations: MatvecOperation[] = [];
   private logits?: GPUBuffer;
 
   private constructor(options: DenseEngineOptions) {
@@ -291,10 +296,49 @@ export class DenseQwen3Engine implements SplitEngine {
       if (!weights.finalNorm) throw new Error("host/head role is missing final norm");
       const finalNorm = this.uploadF32(weights.finalNorm);
       this.finalNormGroup = this.normGroup(finalNorm);
-      const head = this.upload(weights.head ?? this.requireEmbedding());
       this.logits = this.empty(vocabSize * 4, storage, "logits");
-      this.headOperation = this.matvec(head, this.normalized, this.logits, vocabSize, hiddenSize);
+      this.headOperations = this.buildHead(weights.head ?? this.requireEmbedding(), vocabSize, hiddenSize);
     }
+  }
+
+  /**
+   * Upload the language-model head, splitting it across row chunks when a single
+   * binding would exceed the device limit. Qwen3 ties the head to the embedding
+   * table, so this matrix is 148-371 MiB of quants depending on the model while
+   * `maxStorageBufferBindingSize` is commonly 256 MiB.
+   */
+  private buildHead(head: Weight, vocabSize: number, hiddenSize: number): MatvecOperation[] {
+    const logits = this.logits!;
+    const limit = this.device.limits.maxStorageBufferBindingSize;
+
+    if (head.kind !== "q8") {
+      const bytes = vocabSize * hiddenSize * Float32Array.BYTES_PER_ELEMENT;
+      if (bytes > limit) {
+        throw new Error(
+          `f32 language-model head needs ${bytes} bytes but this device binds at most ${limit}; ` +
+            "only Q8_0 heads support chunking",
+        );
+      }
+      return [this.matvec(this.upload(head), this.normalized, logits, vocabSize, hiddenSize)];
+    }
+
+    const chunks = planHeadChunks(vocabSize, hiddenSize, limit);
+    if (chunks.length === 1) {
+      return [this.matvec(this.upload(head), this.normalized, logits, vocabSize, hiddenSize)];
+    }
+    return chunks.map((chunk) =>
+      this.matvec(
+        this.upload(sliceQ8Rows(head as Q8Weight, hiddenSize, chunk)),
+        this.normalized,
+        {
+          buffer: logits,
+          offset: chunk.rowOffset * Float32Array.BYTES_PER_ELEMENT,
+          size: chunk.rowCount * Float32Array.BYTES_PER_ELEMENT,
+        },
+        chunk.rowCount,
+        hiddenSize,
+      ),
+    );
   }
 
   private requireEmbedding(): Weight {
@@ -321,10 +365,14 @@ export class DenseQwen3Engine implements SplitEngine {
     return pipeline;
   }
 
-  private bind(pipeline: GPUComputePipeline, group: number, buffers: GPUBuffer[]): GPUBindGroup {
+  private bind(pipeline: GPUComputePipeline, group: number, buffers: BindEntry[]): GPUBindGroup {
     return this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(group),
-      entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })),
+      entries: buffers.map((entry, binding) => ({
+        binding,
+        // Structural check: avoids depending on the GPUBuffer global existing as a value.
+        resource: "buffer" in entry ? entry : { buffer: entry },
+      })),
     });
   }
 
@@ -338,7 +386,7 @@ export class DenseQwen3Engine implements SplitEngine {
     return buffer;
   }
 
-  private matvec(weight: GPUWeight, input: GPUBuffer, output: GPUBuffer, rows: number, columns: number): MatvecOperation {
+  private matvec(weight: GPUWeight, input: GPUBuffer, output: BindEntry, rows: number, columns: number): MatvecOperation {
     if (weight.kind === "f32") {
       const pipeline = this.pipeline("matvec");
       return {
@@ -458,7 +506,7 @@ export class DenseQwen3Engine implements SplitEngine {
   }
 
   async headFromHidden(hidden: Float32Array): Promise<Float32Array> {
-    if (!this.role.hasHead || !this.finalNormGroup || !this.headOperation || !this.logits) {
+    if (!this.role.hasHead || !this.finalNormGroup || this.headOperations.length === 0 || !this.logits) {
       throw new Error("headFromHidden requires the host/head role");
     }
     if (hidden.length !== this.config.hiddenSize) throw new Error(`hidden state must contain ${this.config.hiddenSize} floats`);
@@ -466,7 +514,7 @@ export class DenseQwen3Engine implements SplitEngine {
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     this.dispatch(pass, "rms_norm", this.finalNormGroup, 1);
-    this.dispatchMatvec(pass, this.headOperation);
+    for (const operation of this.headOperations) this.dispatchMatvec(pass, operation);
     pass.end();
     this.device.queue.submit([encoder.finish()]);
     return readFloatBuffer(this.device, this.logits, this.config.vocabSize);

@@ -13,6 +13,7 @@ import {
   decodeHiddenFrame,
   encodeHiddenFrame,
   isControlMessage,
+  PROTOCOL_VERSION,
   type HiddenStateFrame,
   type RoomRole,
 } from "./protocol.ts";
@@ -161,6 +162,20 @@ export class PeerTransport {
         this.options.events.onError(asError(error));
       }
       return;
+    }
+    // A peer on a cached bundle speaks an older protocol. Say so, rather than
+    // reporting a generic unknown payload.
+    if (data && typeof data === "object" && typeof (data as { v?: unknown }).v === "number") {
+      const version = (data as { v: number }).v;
+      if (version !== PROTOCOL_VERSION) {
+        this.options.events.onError(
+          new Error(
+            `Peer is running protocol v${version}; this device speaks v${PROTOCOL_VERSION}. ` +
+              "Reload the app on both devices.",
+          ),
+        );
+        return;
+      }
     }
     this.options.events.onError(new Error("Received an unknown room payload"));
   }

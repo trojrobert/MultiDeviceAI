@@ -3,14 +3,23 @@
  * engine.
  */
 
+import { fetchGGUFIndex } from "./gguf.ts";
+import {
+  MODEL_CATALOGUE,
+  profileModel,
+  requireModel,
+  type ModelEntry,
+  type ModelProfile,
+} from "./model.ts";
 import {
   initWebGPU,
   loadQwen3Engine,
-  QWEN3_06B_LAYER_COUNT,
+  type GGUFIndex,
   type LoadedQwen3Engine,
   type ModelRole,
 } from "./index.ts";
 import { greedySample } from "./sampling.ts";
+import { describeAdapter } from "../runtime/capabilities.ts";
 import type {
   DistributedEngine,
   EngineLoadOptions,
@@ -22,7 +31,6 @@ import type {
   TranscriptEntry,
 } from "../runtime/protocol.ts";
 
-const MODEL_ID = "qwen3-0.6b-q8_0";
 const MAX_SEQUENCE_LENGTH = 256;
 const MAX_NEW_TOKENS = 64;
 const SPECIAL_TOKENS = new Set([
@@ -34,45 +42,34 @@ const SPECIAL_TOKENS = new Set([
 ]);
 
 export class QwenRuntimeAdapter implements DistributedEngine {
-  readonly layerCount = QWEN3_06B_LAYER_COUNT;
-  readonly modelId = MODEL_ID;
+  readonly catalogue: readonly ModelEntry[] = MODEL_CATALOGUE;
 
   private loaded?: LoadedQwen3Engine;
   private device?: GPUDevice;
   private assignment?: LayerAssignment;
+  private profile?: ModelProfile;
+  /** GGUF headers are several MiB; keep them so a load never re-fetches one. */
+  private readonly indexCache = new Map<string, GGUFIndex>();
+
+  get activeProfile(): ModelProfile | undefined {
+    return this.profile;
+  }
+
+  async probeModel(modelId: string): Promise<ModelProfile> {
+    const entry = requireModel(modelId);
+    let index = this.indexCache.get(entry.url);
+    if (!index) {
+      // The host needs tokenizer metadata later, and the header is fetched once
+      // per session either way, so parse it now rather than twice.
+      index = await fetchGGUFIndex(entry.url);
+      this.indexCache.set(entry.url, index);
+    }
+    this.profile = profileModel(index, entry);
+    return this.profile;
+  }
 
   async getCapabilities(label: string): Promise<DeviceCapabilities> {
-    if (!navigator.gpu) {
-      return {
-        label,
-        userAgent: navigator.userAgent,
-        webgpu: false,
-        maxBufferSize: 0,
-      };
-    }
-    const adapter = await navigator.gpu.requestAdapter({
-      powerPreference: "high-performance",
-    });
-    if (!adapter) {
-      return {
-        label,
-        userAgent: navigator.userAgent,
-        webgpu: false,
-        maxBufferSize: 0,
-      };
-    }
-    const info = adapter.info;
-    return {
-      label,
-      userAgent: navigator.userAgent,
-      webgpu: true,
-      gpu:
-        [info.vendor, info.architecture, info.device]
-          .filter(Boolean)
-          .join(" · ") || "WebGPU adapter",
-      maxBufferSize: adapter.limits.maxBufferSize,
-      estimatedMemoryBytes: adapter.limits.maxBufferSize,
-    };
+    return describeAdapter(label);
   }
 
   async load(options: EngineLoadOptions): Promise<void> {
@@ -87,6 +84,19 @@ export class QwenRuntimeAdapter implements DistributedEngine {
     const { device } = await initWebGPU();
     this.device = device;
 
+    // The assignment is authoritative about which model to load: a peer on a
+    // stale bundle must fail rather than resolve a different file locally.
+    const modelUrl = options.assignment.modelUrl;
+    let index = this.indexCache.get(modelUrl);
+    if (!index) {
+      options.onProgress(0, "Reading model header…");
+      index = await fetchGGUFIndex(modelUrl, {
+        skipTokenizer: !options.assignment.ownsEmbedding,
+      });
+      this.indexCache.set(modelUrl, index);
+    }
+    if (options.signal.aborted) throw abortError();
+
     const role: ModelRole = {
       layerRange: [options.assignment.start, options.assignment.end],
       hasEmbedding: options.assignment.ownsEmbedding,
@@ -94,6 +104,8 @@ export class QwenRuntimeAdapter implements DistributedEngine {
     };
     this.loaded = await loadQwen3Engine({
       device,
+      modelUrl,
+      index,
       role,
       maxSequenceLength: MAX_SEQUENCE_LENGTH,
       onProgress: (progress) => {

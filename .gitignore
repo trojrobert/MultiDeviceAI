@@ -6,3 +6,4 @@ dist/
 # Cached model weights pulled at runtime
 models/
 *.gguf
+.vercel

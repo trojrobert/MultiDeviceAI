@@ -342,42 +342,68 @@ function requireF32(weight: Weight, name: string): F32Weight {
   return weight;
 }
 
+/**
+ * Range requests are independent, so the shard downloads far faster with a few
+ * in flight at once. Kept modest: a 4B host shard is ~380 tensors, and browsers
+ * cap concurrent connections per origin anyway.
+ */
+export const DEFAULT_FETCH_CONCURRENCY = 6;
+
 export async function loadModelWeights(
   index: GGUFIndex,
   role: ModelRole,
   fetchFn: typeof fetch = fetch,
   onProgress?: ProgressCallback,
+  concurrency: number = DEFAULT_FETCH_CONCURRENCY,
 ): Promise<ModelWeights> {
+  const names = shardTensorNames(index, role);
   const totalBytes = shardDownloadBytes(index, role);
   let loadedBytes = 0;
-  const load = async (name: string): Promise<Weight> => {
-    const weight = await loadWeight(index, name, fetchFn);
-    loadedBytes += index.tensors[name]!.byteLength;
-    onProgress?.({ phase: "weights", loadedBytes, totalBytes, tensor: name });
+  const loaded = new Map<string, Weight>();
+
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < names.length) {
+      const name = names[cursor++]!;
+      const weight = await loadWeight(index, name, fetchFn);
+      loaded.set(name, weight);
+      loadedBytes += index.tensors[name]!.byteLength;
+      // Progress is by bytes completed, so out-of-order arrival is fine; the
+      // callback may throw to abort the load.
+      onProgress?.({ phase: "weights", loadedBytes, totalBytes, tensor: name });
+    }
+  };
+  const lanes = Math.max(1, Math.min(Math.floor(concurrency) || 1, names.length));
+  await Promise.all(Array.from({ length: lanes }, worker));
+
+  const take = (name: string): Weight => {
+    const weight = loaded.get(name);
+    if (!weight) throw new Error(`missing tensor ${name}`);
     return weight;
   };
+
   const layers = [];
   for (let layer = role.layerRange[0]; layer < role.layerRange[1]; layer++) {
     const names = qwenLayerTensorNames(layer);
     layers.push({
-      inputNorm: requireF32(await load(names.inputNorm), names.inputNorm),
-      query: await load(names.query),
-      key: await load(names.key),
-      value: await load(names.value),
-      output: await load(names.output),
-      queryNorm: requireF32(await load(names.queryNorm), names.queryNorm),
-      keyNorm: requireF32(await load(names.keyNorm), names.keyNorm),
-      postAttentionNorm: requireF32(await load(names.postAttentionNorm), names.postAttentionNorm),
-      gate: await load(names.gate),
-      up: await load(names.up),
-      down: await load(names.down),
+      inputNorm: requireF32(take(names.inputNorm), names.inputNorm),
+      query: take(names.query),
+      key: take(names.key),
+      value: take(names.value),
+      output: take(names.output),
+      queryNorm: requireF32(take(names.queryNorm), names.queryNorm),
+      keyNorm: requireF32(take(names.keyNorm), names.keyNorm),
+      postAttentionNorm: requireF32(take(names.postAttentionNorm), names.postAttentionNorm),
+      gate: take(names.gate),
+      up: take(names.up),
+      down: take(names.down),
     });
   }
   const weights: ModelWeights = { layers };
-  if (role.hasEmbedding || role.hasHead) weights.embedding = await load(EMBEDDING_TENSOR);
+  if (role.hasEmbedding || role.hasHead) weights.embedding = take(EMBEDDING_TENSOR);
   if (role.hasHead) {
-    weights.finalNorm = requireF32(await load(FINAL_NORM_TENSOR), FINAL_NORM_TENSOR);
-    if (index.tensors[OUTPUT_TENSOR]) weights.head = await load(OUTPUT_TENSOR);
+    weights.finalNorm = requireF32(take(FINAL_NORM_TENSOR), FINAL_NORM_TENSOR);
+    if (index.tensors[OUTPUT_TENSOR]) weights.head = take(OUTPUT_TENSOR);
   }
   return weights;
 }

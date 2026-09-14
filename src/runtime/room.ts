@@ -1,3 +1,6 @@
+import { DEFAULT_MODEL_ID, roleDownloadBytes, type ModelEntry, type ModelProfile } from "../engine/model.ts";
+import { planPlacement, type PlacementResult } from "../engine/placement.ts";
+import { unavailableCapabilities, withUserBudget } from "./capabilities.ts";
 import {
   probeCapabilities,
   resolveEngineFactory,
@@ -7,6 +10,8 @@ import {
 import { PeerTransport } from "./peer.ts";
 import {
   control,
+  modelFingerprint,
+  PROTOCOL_VERSION,
   type ControlMessage,
   type DeviceCapabilities,
   type HiddenStateFrame,
@@ -16,12 +21,27 @@ import {
   type TranscriptEntry,
 } from "./protocol.ts";
 
-const DEFAULT_LAYER_COUNT = 28;
-const DEFAULT_MODEL_ID = "qwen3-0.6b-q8_0";
+/**
+ * A worker pass on a phone can be slow on the first token while shaders warm
+ * up, and a 36-layer shard is slower still, so this is deliberately generous.
+ */
+const HIDDEN_REQUEST_TIMEOUT_MS = 60_000;
+
+/** Must match `MAX_SEQUENCE_LENGTH` in the engine adapter; drives KV-cache estimates. */
+const MAX_SEQUENCE_LENGTH = 256;
+
+export type ModelPhase = "idle" | "probing" | "ready" | "error";
 
 export interface RoomSnapshot {
   role?: RoomRole;
   roomCode?: string;
+  /** Models this build offers; empty until an engine is available. */
+  catalogue: readonly ModelEntry[];
+  modelId: string;
+  modelPhase: ModelPhase;
+  /** Real shape and byte layout of the selected model, once probed. */
+  modelProfile?: ModelProfile;
+  placement?: PlacementResult;
   localCapabilities?: DeviceCapabilities;
   remoteCapabilities?: DeviceCapabilities;
   localAssignment?: LayerAssignment;
@@ -70,6 +90,9 @@ export class RoomController {
       localPhase: "connecting",
       remotePhase: "connecting",
       status: "Create a room or join one from a shared link.",
+      catalogue: [],
+      modelId: DEFAULT_MODEL_ID,
+      modelPhase: "idle",
       transcript: [],
       connected: false,
       ready: false,
@@ -110,14 +133,9 @@ export class RoomController {
         this.fail(error);
       }
     }
-    const fallbackCapabilities: DeviceCapabilities = {
-      label,
-      userAgent: navigator.userAgent,
-      webgpu: Boolean(navigator.gpu),
-      maxBufferSize: 0,
-    };
     this.patch({
-      localCapabilities: fallbackCapabilities,
+      localCapabilities: unavailableCapabilities(label),
+      catalogue: this.engine?.catalogue ?? [],
       engineAvailable: Boolean(this.engine),
     });
     const signal = new URLSearchParams(location.search).get("signal") ?? undefined;
@@ -135,6 +153,9 @@ export class RoomController {
       },
     });
     await this.transport.connect();
+    // Layer count and hidden size are per-model, so nothing downstream — the
+    // split ribbon included — can render until the header has been read.
+    if (role === "host") void this.selectModel(this.state.modelId);
     const capabilityPromise = this.engine
       ? this.engine.getCapabilities(label)
       : probeCapabilities(label);
@@ -154,26 +175,80 @@ export class RoomController {
     });
   }
 
+  /** Host-only: probe a model's GGUF header so its real shape is known. */
+  async selectModel(modelId: string): Promise<void> {
+    if (this.state.role !== "host" || !this.engine) return;
+    this.patch({ modelId, modelPhase: "probing", modelProfile: undefined, placement: undefined });
+    try {
+      const profile = await this.engine.probeModel(modelId);
+      if (this.state.modelId !== modelId) return;
+      this.patch({ modelProfile: profile, modelPhase: "ready" });
+      this.recomputePlacement();
+    } catch (error) {
+      this.patch({ modelPhase: "error" });
+      this.fail(error);
+    }
+  }
+
+  /** Override this device's memory estimate and re-plan against it. */
+  setBudgetBytes(bytes: number): void {
+    const capabilities = this.state.localCapabilities;
+    if (!capabilities) return;
+    this.patch({ localCapabilities: withUserBudget(capabilities, bytes) });
+    if (this.state.connected) {
+      this.send(control({ type: "hello", role: this.state.role!, capabilities: this.state.localCapabilities! }));
+    }
+    this.recomputePlacement();
+  }
+
+  private recomputePlacement(): void {
+    const profile = this.state.modelProfile;
+    if (!profile || this.state.role !== "host") return;
+    this.patch({
+      placement: planPlacement({
+        profile,
+        hostBudgetBytes: this.state.localCapabilities?.budgetBytes ?? 0,
+        workerBudgetBytes: this.state.remoteCapabilities?.budgetBytes ?? 0,
+        maxSequenceLength: MAX_SEQUENCE_LENGTH,
+      }),
+    });
+  }
+
   async assignSplit(split: number): Promise<void> {
     if (this.state.role !== "host") return;
-    const layerCount = this.engine?.layerCount ?? DEFAULT_LAYER_COUNT;
+    const profile = this.state.modelProfile;
+    if (!profile) {
+      this.fail(new Error("Choose a model before assigning layers"));
+      return;
+    }
+    const { layerCount } = profile;
     const bounded = Math.max(1, Math.min(layerCount - 1, Math.round(split)));
-    const modelId = this.engine?.modelId ?? DEFAULT_MODEL_ID;
+    const shared = {
+      layerCount,
+      modelId: profile.modelId,
+      modelUrl: profile.url,
+      hiddenSize: profile.hiddenSize,
+      fingerprint: modelFingerprint(profile),
+    };
     const hostAssignment: LayerAssignment = {
+      ...shared,
       start: 0,
       end: bounded,
-      layerCount,
-      modelId,
       ownsEmbedding: true,
       ownsHead: true,
+      bytes: roleDownloadBytes(profile, { layerRange: [0, bounded], hasEmbedding: true, hasHead: true }),
     };
     const workerAssignment: LayerAssignment = {
+      ...shared,
       start: bounded,
       end: layerCount,
-      layerCount,
-      modelId,
       ownsEmbedding: false,
       ownsHead: false,
+      bytes: roleDownloadBytes(profile, {
+        layerRange: [bounded, layerCount],
+        hasEmbedding: false,
+        hasHead: false,
+      }),
     };
     this.patch({
       localAssignment: hostAssignment,
@@ -235,13 +310,14 @@ export class RoomController {
       const timeout = setTimeout(() => {
         this.pendingHidden.delete(requestId);
         reject(new Error(`Hidden-state request ${requestId} timed out`));
-      }, 30_000);
+      }, HIDDEN_REQUEST_TIMEOUT_MS);
       this.pendingHidden.set(requestId, { resolve, reject, timeout });
       try {
         this.transport?.sendHidden({
           kind: "request",
           requestId,
           position,
+          fingerprint: this.state.localAssignment?.fingerprint ?? 0,
           values,
         });
       } catch (error) {
@@ -263,12 +339,8 @@ export class RoomController {
       control({
         type: "hello",
         role: this.state.role!,
-        capabilities: this.state.localCapabilities ?? {
-          label: this.state.role ?? "device",
-          userAgent: navigator.userAgent,
-          webgpu: Boolean(navigator.gpu),
-          maxBufferSize: 0,
-        },
+        capabilities:
+          this.state.localCapabilities ?? unavailableCapabilities(this.state.role ?? "device"),
       }),
     );
   }
@@ -284,6 +356,9 @@ export class RoomController {
               ? "Worker connected. Confirm the layer split to load."
               : "Connected to host. Waiting for layer assignment…",
         });
+        // The peer's budget is half of the placement input, so the plan is only
+        // meaningful once its hello has landed.
+        this.recomputePlacement();
         break;
       case "assignment":
         this.patch({ localAssignment: message.assignment, ready: false });
@@ -378,6 +453,16 @@ export class RoomController {
       if (!pending) return;
       clearTimeout(pending.timeout);
       this.pendingHidden.delete(frame.requestId);
+      const expected = this.state.localAssignment;
+      if (expected && frame.fingerprint !== expected.fingerprint) {
+        pending.reject(
+          new Error(
+            `Peer returned a hidden state from a different model ` +
+              `(${frame.fingerprint} vs ${expected.fingerprint})`,
+          ),
+        );
+        return;
+      }
       pending.resolve(frame.values);
       return;
     }
@@ -391,6 +476,28 @@ export class RoomController {
       );
       return;
     }
+
+    // Fail loudly on a model mismatch rather than transforming a hidden state
+    // through the wrong layers. The width check alone is not enough — two
+    // models can share a hidden size — so the fingerprint is authoritative.
+    const assignment = this.state.localAssignment;
+    if (assignment && frame.fingerprint !== assignment.fingerprint) {
+      const detail = `peer sent model ${frame.fingerprint}, this device loaded ${assignment.fingerprint}`;
+      this.send(
+        control({ type: "error", code: "model-mismatch", message: `Devices are running different models (${detail})` }),
+      );
+      this.fail(new Error(`Model mismatch between devices: ${detail}`));
+      return;
+    }
+    if (assignment && frame.values.length !== assignment.hiddenSize) {
+      const detail = `got ${frame.values.length} floats, expected ${assignment.hiddenSize}`;
+      this.send(
+        control({ type: "error", code: "width-mismatch", message: `Hidden state has the wrong width (${detail})` }),
+      );
+      this.fail(new Error(`Hidden-state width mismatch: ${detail}`));
+      return;
+    }
+
     try {
       const values = await this.engine.runHidden(frame.values, frame.position);
       this.transport?.sendHidden({ ...frame, kind: "response", values });
@@ -443,7 +550,7 @@ export class RoomController {
           this.requestWorkerHidden(hidden, position),
         onToken: (tokenId, text) => {
           this.applyToken({
-            v: 1,
+            v: PROTOCOL_VERSION,
             type: "token",
             entryId: assistant.id,
             tokenId,

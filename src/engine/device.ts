@@ -44,9 +44,19 @@ export async function initWebGPU(
   options: GPURequestAdapterOptions = { powerPreference: "high-performance" },
 ): Promise<GPUContext> {
   if (!isWebGPUAvailable()) {
+    // navigator.gpu is only exposed in a secure context. The most common cause
+    // in this app is opening it on a second device over a plain http:// LAN
+    // address, where WebGPU is silently withheld — so call that out explicitly.
+    const insecureContext = globalThis.isSecureContext === false;
     throw new WebGPUInitializationError(
-      "WebGPU is not available in this runtime (navigator.gpu is undefined). " +
-        "Use a WebGPU-capable browser, or run under Deno with --unstable-webgpu.",
+      insecureContext
+        ? "WebGPU is unavailable because this page is not a secure context. " +
+            "navigator.gpu is only exposed over HTTPS or on localhost — loading the " +
+            "app from a plain http:// LAN address (e.g. http://192.168.x.x:5173) will " +
+            "not work. Serve it over HTTPS: deploy it, or run the dev server with TLS."
+        : "WebGPU is not available in this runtime (navigator.gpu is undefined). " +
+            "Use a WebGPU-capable browser (Chrome/Edge 121+ or Safari 18+), or run " +
+            "under Deno with --unstable-webgpu.",
       "unavailable",
     );
   }

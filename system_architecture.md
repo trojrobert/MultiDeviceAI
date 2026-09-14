@@ -12,8 +12,8 @@ locally; intermediate hidden states move between peers over WebRTC.
 The POC supports exactly two compute peers:
 
 - **Host:** owns the tokenizer, embedding table, lower transformer layers,
-  final normalization, language-model head, sampler, generation loop, and room
-  authority.
+  final normalization, language-model head, sampler, generation loop, model
+  selection, and room authority.
 - **Worker:** owns the upper transformer layers and transforms hidden states
   received from the host.
 
@@ -60,11 +60,38 @@ hidden-state request.
 
 ## Model and format
 
-The first model is Qwen3 0.6B Q8_0 GGUF. It is selected because it exercises the
-same dense Qwen architecture and layer-sharding boundary as larger models while
-remaining practical for correctness work. Supporting a small model proves that
-the split is physical; supporting a model larger than one device is a later
-capacity milestone.
+Models are dense Qwen3 Q8_0 GGUFs, selected from a catalogue at run time. The
+format is fixed: the loader repacks 2-D Q8_0 tensors and dequantizes everything
+else to f32, so there is no K-quant path.
+
+Nothing may assume a model's shape. Layer count, hidden size, and per-tensor
+byte sizes are read from the chosen GGUF's header before layers are assigned,
+because they differ per model (28 layers and hidden 1024 at 0.6B; 36 and 2560 at
+4B). The assignment carries the model URL, hidden size, and a fingerprint so the
+two peers cannot end up on different models.
+
+Qwen3 ties the language-model head to the embedding table, which makes it the
+only tensor large enough to exceed `maxStorageBufferBindingSize` — 148 MiB of
+quants at 0.6B but 371 MiB at 4B, against a 256 MiB default. The head is
+therefore uploaded as row chunks, each with its own weight buffers and its own
+slice of the logits buffer. No per-layer tensor comes close to the limit.
+
+## Capacity
+
+Supporting a model larger than one device is the capacity milestone, and Qwen3
+4B Q8_0 meets it: roughly 4.05 GB of weights, KV caches, and working buffers,
+which fits in neither browser alone.
+
+Placement is computed, not guessed. Each device reports a memory budget, and for
+every legal split the host estimates both roles' footprints and reports one of
+three verdicts: the model fits on one device, it needs both, or it fits neither.
+The recommended split maximises the tighter device's headroom rather than
+filling one device to its ceiling, since these budgets are estimates.
+
+The browser exposes no real VRAM figure. `maxBufferSize` is a per-allocation
+limit, not a capacity, and `navigator.deviceMemory` is coarse and
+Chromium-only. The budget is therefore presented as an editable estimate with
+its source labelled, rather than as a measurement.
 
 ## Security and deployment
 

@@ -6,14 +6,30 @@ export {
   type GPUContext,
 } from "./device.ts";
 export {
+  DEFAULT_MODEL_ID,
+  MODEL_CATALOGUE,
   QWEN3_06B_LAYER_COUNT,
   QWEN3_06B_Q8_URL,
   estimateRoleMemoryBytes,
+  findModel,
   loadQwen3Engine,
+  profileModel,
+  requireModel,
+  roleDownloadBytes,
   splitQwen3Layers,
   validateRole,
   type LoadedQwen3Engine,
+  type ModelEntry,
+  type ModelProfile,
 } from "./model.ts";
+export {
+  defaultBudgetBytes,
+  planPlacement,
+  type PlacementResult,
+  type PlacementVerdict,
+  type SplitCandidate,
+} from "./placement.ts";
+export { planHeadChunks, sliceQ8Rows, type HeadChunk } from "./headChunks.ts";
 export { DenseQwen3Engine, type DenseEngineOptions } from "./denseEngine.ts";
 export {
   fetchGGUFIndex,

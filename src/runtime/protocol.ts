@@ -1,11 +1,16 @@
 /**
  * Room control and activation protocol for the two-peer POC.
  *
+ * Version 2 carries the model with the assignment. A v1 peer would ignore
+ * those fields and silently load a different model from the host, so the
+ * version gate below turns that into a clean failure instead of garbage
+ * output.
+ *
  * The binary framing is original to MultiDeviceAI, with a separation between
  * control messages and activation frames.
  */
 
-export const PROTOCOL_VERSION = 1 as const;
+export const PROTOCOL_VERSION = 2 as const;
 export const HIDDEN_FRAME_HEADER_BYTES = 24;
 
 const MAGIC = 0x4d444c4d; // "MDLM"
@@ -24,8 +29,15 @@ export interface DeviceCapabilities {
   userAgent: string;
   webgpu: boolean;
   gpu?: string;
+  /** Largest single allocation. A limit, not a capacity. */
   maxBufferSize: number;
-  estimatedMemoryBytes?: number;
+  /** Largest single storage binding; drives language-model head chunking. */
+  maxStorageBufferBindingSize: number;
+  /** `navigator.deviceMemory` in GiB. Chromium only, coarse, capped at 8. */
+  deviceMemoryGiB?: number;
+  /** Memory this device is willing to spend on a shard. An estimate the user can correct. */
+  budgetBytes: number;
+  budgetSource: "device-memory" | "heuristic" | "user";
 }
 
 export interface LayerAssignment {
@@ -33,8 +45,36 @@ export interface LayerAssignment {
   end: number;
   layerCount: number;
   modelId: string;
+  /** Authoritative source for the weights. Sent rather than resolved from the
+   *  peer's own catalogue, so a peer on a stale bundle fails instead of
+   *  quietly loading a different file. */
+  modelUrl: string;
+  hiddenSize: number;
+  /** Identifies the exact model both peers must agree on; see `modelFingerprint`. */
+  fingerprint: number;
+  /** Exact download size for this role, so the UI never has to estimate. */
+  bytes: number;
   ownsEmbedding: boolean;
   ownsHead: boolean;
+}
+
+/**
+ * Stable u32 identity for a model, carried on every activation frame so a
+ * mismatch is caught at the first token. A width check alone is not enough:
+ * two different models can share a hidden size.
+ */
+export function modelFingerprint(model: {
+  modelId: string;
+  layerCount: number;
+  hiddenSize: number;
+}): number {
+  const text = `${model.modelId}|${model.layerCount}|${model.hiddenSize}`;
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
 }
 
 export interface TranscriptEntry {
@@ -91,6 +131,8 @@ export interface HiddenStateFrame {
   kind: "request" | "response";
   requestId: number;
   position: number;
+  /** Model identity, checked by the receiver before it runs any layers. */
+  fingerprint: number;
   values: Float32Array;
 }
 
@@ -143,7 +185,7 @@ export function encodeHiddenFrame(frame: HiddenStateFrame): ArrayBuffer {
   view.setUint32(8, frame.requestId, true);
   view.setUint32(12, frame.position, true);
   view.setUint32(16, frame.values.length, true);
-  view.setUint32(20, 0, true);
+  view.setUint32(20, frame.fingerprint >>> 0, true);
   new Uint8Array(buffer, HIDDEN_FRAME_HEADER_BYTES).set(
     new Uint8Array(
       frame.values.buffer,
@@ -184,6 +226,7 @@ export function decodeHiddenFrame(buffer: ArrayBuffer): HiddenStateFrame {
     kind: kindByte === 1 ? "request" : "response",
     requestId: view.getUint32(8, true),
     position: view.getUint32(12, true),
+    fingerprint: view.getUint32(20, true),
     values: new Float32Array(copy.buffer),
   };
 }

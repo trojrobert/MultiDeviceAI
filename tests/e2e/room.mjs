@@ -39,22 +39,30 @@ try {
   await host.locator("#room-view").waitFor({ state: "visible" });
   const roomCode = (await host.locator("#room-code-display").textContent())?.trim();
   assert.match(roomCode ?? "", /^[A-Z2-9]{6}$/);
-  assert.equal(await host.locator("#role-display").textContent(), "host");
+  assert.equal(await host.locator("#role-display").textContent(), "Host");
 
   await worker.goto(`${baseURL}/?room=${roomCode}`);
   await worker.locator("#join-room").click();
   await worker.locator("#room-view").waitFor({ state: "visible" });
-  assert.equal(await worker.locator("#role-display").textContent(), "worker");
+  assert.equal(await worker.locator("#role-display").textContent(), "Worker");
+
+  // The host picks the model; the worker is told what to load.
+  await host.locator("#model-card").waitFor({ state: "visible" });
+  assert.ok(
+    (await host.locator("#model-select option").count()) > 1,
+    "the host must be offered more than one model",
+  );
+  assert.equal(await worker.locator("#model-card").isVisible(), false);
 
   try {
     await host.waitForFunction(
-      () => document.querySelector("#remote-name")?.textContent === "phone" ||
-        document.querySelector("#remote-name")?.textContent === "laptop",
+      () => document.querySelector("#remote-name")?.textContent === "Phone" ||
+        document.querySelector("#remote-name")?.textContent === "Laptop",
       undefined,
       { timeout: 30_000 },
     );
     await worker.waitForFunction(
-      () => document.querySelector("#remote-name")?.textContent === "laptop",
+      () => document.querySelector("#remote-name")?.textContent === "Laptop",
       undefined,
       { timeout: 30_000 },
     );
