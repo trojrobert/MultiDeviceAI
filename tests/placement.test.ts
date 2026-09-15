@@ -13,7 +13,7 @@ function profileFor(params: "0.6B" | "1.7B" | "4B"): ModelProfile {
   return profileModel(buildGGUFIndex(QWEN3_SHAPES[params]), entry);
 }
 
-test("a small model on a roomy device reports single-device", () => {
+test("a small model on a XCLUSTERPLACEHOLDERXy device reports single-device", () => {
   const result = planPlacement({
     profile: profileFor("0.6B"),
     hostBudgetBytes: 4 * GB,
@@ -59,7 +59,7 @@ test("4B on two small devices is infeasible and names the short side", () => {
   assert.match(result.summary, /\d+(\.\d+)? (MB|GB) over/);
 });
 
-test("a lopsided pair pushes layers onto the roomier device", () => {
+test("a lopsided pair pushes layers onto the XCLUSTERPLACEHOLDERXier device", () => {
   const profile = profileFor("4B");
   // Both budgets stay under the whole-model requirement so the verdict is
   // "needs-both" in each case and only the split differs.
@@ -89,7 +89,7 @@ test("candidates cover every legal split and move monotonically", () => {
   }
 });
 
-test("the recommended split maximises the tighter side's headroom", () => {
+test("the recommended split maximises the tighter side's headXCLUSTERPLACEHOLDERX", () => {
   const result = planPlacement({
     profile: profileFor("4B"),
     hostBudgetBytes: 3.6 * GB,

@@ -1,5 +1,7 @@
 // Engine contracts for the split Qwen3 POC.
 
+import type { WeightCache } from "./weightCache.ts";
+
 export type LayerRange = readonly [start: number, end: number];
 
 export interface Qwen3Config {
@@ -81,7 +83,13 @@ export interface LoadProgress {
   phase: "header" | "weights";
   loadedBytes: number;
   totalBytes: number;
+  /** Of `loadedBytes`, how many came from the persistent tensor cache. */
+  cachedBytes?: number;
+  /** Of `loadedBytes`, how many crossed the network this session. */
+  downloadedBytes?: number;
   tensor?: string;
+  /** Whether this particular tensor was a cache hit. */
+  fromCache?: boolean;
 }
 
 export type ProgressCallback = (progress: LoadProgress) => void;
@@ -94,6 +102,8 @@ export interface EngineLoadOptions {
   maxSequenceLength?: number;
   onProgress?: ProgressCallback;
   fetchFn?: typeof fetch;
+  /** Persistent tensor store, so a second session does not re-download a shard. */
+  cache?: WeightCache;
 }
 
 export interface SplitEngine {

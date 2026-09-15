@@ -1,5 +1,7 @@
 import type { ModelEntry, ModelProfile } from "../engine/model.ts";
+import type { StorageEstimate, WeightCacheStats } from "../engine/weightCache.ts";
 import { describeAdapter } from "./capabilities.ts";
+import type { TokenSample } from "./metrics.ts";
 import type {
   DeviceCapabilities,
   LayerAssignment,
@@ -12,14 +14,39 @@ export interface EngineLoadOptions {
   onProgress(progress: number, detail?: string): void;
 }
 
+/** What the host learns from one activation round trip. */
+export interface RemoteHiddenResult {
+  values: Float32Array;
+  /** Host-observed request-to-response time, in microseconds. */
+  roundTripMicros: number;
+  /** Time the peer reported spending in its own layers, in microseconds. */
+  workerMicros: number;
+  bytesOut: number;
+  bytesIn: number;
+}
+
 export interface GenerationOptions {
   signal: AbortSignal;
   maxNewTokens?: number;
   onToken(tokenId: number, text: string): void;
+  /** One call per token, with that token's four-stage breakdown. */
+  onStage?(sample: TokenSample): void;
   runRemoteHidden(
     hidden: Float32Array,
     position: number,
-  ): Promise<Float32Array>;
+    prefill: boolean,
+  ): Promise<RemoteHiddenResult>;
+}
+
+/** What the persistent tensor cache holds for the model this device loaded. */
+export interface EngineCacheReport {
+  available: boolean;
+  /** True when the browser agreed not to evict this origin under pressure. */
+  persisted: boolean;
+  shard: WeightCacheStats;
+  total: WeightCacheStats;
+  /** Whole-origin usage and quota, when the browser reports them. */
+  storage?: StorageEstimate;
 }
 
 /**
@@ -50,24 +77,28 @@ export interface DistributedEngine {
     transcript: readonly TranscriptEntry[],
     options: GenerationOptions,
   ): Promise<void>;
+  /** Persistent weight-cache occupancy, for the UI's cache readout. */
+  cacheReport?(): Promise<EngineCacheReport>;
+  /** Drop every cached tensor for every model. */
+  clearCache?(): Promise<void>;
   reset(): Promise<void> | void;
   dispose?(): Promise<void> | void;
 }
 
 export type EngineFactory = () => Promise<DistributedEngine>;
 
-export const ENGINE_FACTORY_GLOBAL = "__MULTIDEVICE_AI_ENGINE_FACTORY__";
+export const ENGINE_FACTORY_GLOBAL = "__LOCAL_CLUSTER_AI_ENGINE_FACTORY__";
 
 declare global {
   interface Window {
-    __MULTIDEVICE_AI_ENGINE_FACTORY__?: EngineFactory;
+    __LOCAL_CLUSTER_AI_ENGINE_FACTORY__?: EngineFactory;
   }
 }
 
 export function resolveEngineFactory(): EngineFactory | undefined {
   return typeof window === "undefined"
     ? undefined
-    : window.__MULTIDEVICE_AI_ENGINE_FACTORY__;
+    : window.__LOCAL_CLUSTER_AI_ENGINE_FACTORY__;
 }
 
 export async function probeCapabilities(

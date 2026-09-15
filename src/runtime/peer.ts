@@ -1,7 +1,7 @@
 /**
  * Two-peer PeerJS transport.
  *
- * Provides room-code addressing and reliable PeerJS connections.
+ * Provides cluster-code addressing and reliable PeerJS connections.
  */
 import Peer, {
   type DataConnection,
@@ -15,40 +15,41 @@ import {
   isControlMessage,
   PROTOCOL_VERSION,
   type HiddenStateFrame,
-  type RoomRole,
+  type ClusterRole,
 } from "./protocol.ts";
 
-const ROOM_PREFIX = "mdllm-poc-";
-const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const CLUSTER_PREFIX = "lcai-poc-";
+const CLUSTER_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 export interface PeerTransportEvents {
   onOpen(peerId: string): void;
   onControl(message: ControlMessage): void;
-  onHidden(frame: HiddenStateFrame): void;
+  /** `byteLength` is the framed size on the wire, which the metrics panel bills. */
+  onHidden(frame: HiddenStateFrame, byteLength: number): void;
   onStatus(status: string): void;
   onError(error: Error): void;
   onClose(): void;
 }
 
 export interface PeerTransportOptions {
-  role: RoomRole;
-  roomCode: string;
+  role: ClusterRole;
+  clusterCode: string;
   events: PeerTransportEvents;
   signal?: string;
 }
 
-export function normalizeRoomCode(value: string): string {
+export function normalizeClusterCode(value: string): string {
   return value
     .toUpperCase()
     .replace(/[^A-Z2-9]/g, "")
     .slice(0, 8);
 }
 
-export function createRoomCode(length = 6): string {
+export function createClusterCode(length = 6): string {
   const random = crypto.getRandomValues(new Uint8Array(length));
   return Array.from(
     random,
-    (byte) => ROOM_ALPHABET[byte % ROOM_ALPHABET.length],
+    (byte) => CLUSTER_ALPHABET[byte % CLUSTER_ALPHABET.length],
   ).join("");
 }
 
@@ -63,9 +64,9 @@ export class PeerTransport {
   }
 
   async connect(): Promise<void> {
-    const roomCode = normalizeRoomCode(this.options.roomCode);
-    if (!roomCode) throw new Error("A room code is required");
-    const hostId = `${ROOM_PREFIX}${roomCode}`;
+    const clusterCode = normalizeClusterCode(this.options.clusterCode);
+    if (!clusterCode) throw new Error("A cluster code is required");
+    const hostId = `${CLUSTER_PREFIX}${clusterCode}`;
     const peerOptions = this.peerOptions();
     this.options.events.onStatus("Connecting to PeerJS signaling…");
     this.peer =
@@ -88,7 +89,7 @@ export class PeerTransport {
     });
 
     if (this.options.role === "host") {
-      this.options.events.onStatus("Room open; waiting for worker…");
+      this.options.events.onStatus("Cluster open; waiting for worker…");
       this.peer.on("connection", (connection) => {
         if (this.connection?.open) {
           connection.close();
@@ -99,7 +100,7 @@ export class PeerTransport {
       return;
     }
 
-    this.options.events.onStatus(`Joining room ${roomCode}…`);
+    this.options.events.onStatus(`Joining cluster ${clusterCode}…`);
     const connection = this.peer.connect(hostId, {
       reliable: true,
       serialization: "binary",
@@ -111,8 +112,11 @@ export class PeerTransport {
     this.assertOpen().send(message);
   }
 
-  sendHidden(frame: HiddenStateFrame): void {
-    this.assertOpen().send(encodeHiddenFrame(frame));
+  /** Returns the framed byte count actually sent. */
+  sendHidden(frame: HiddenStateFrame): number {
+    const encoded = encodeHiddenFrame(frame);
+    this.assertOpen().send(encoded);
+    return encoded.byteLength;
   }
 
   close(): void {
@@ -157,7 +161,7 @@ export class PeerTransport {
     const buffer = toArrayBuffer(data);
     if (buffer) {
       try {
-        this.options.events.onHidden(decodeHiddenFrame(buffer));
+        this.options.events.onHidden(decodeHiddenFrame(buffer), buffer.byteLength);
       } catch (error) {
         this.options.events.onError(asError(error));
       }
@@ -177,7 +181,7 @@ export class PeerTransport {
         return;
       }
     }
-    this.options.events.onError(new Error("Received an unknown room payload"));
+    this.options.events.onError(new Error("Received an unknown cluster payload"));
   }
 
   private assertOpen(): DataConnection {
@@ -216,8 +220,8 @@ export class PeerTransport {
 
   private handlePeerError(error: PeerError<string>): void {
     const messages: Record<string, string> = {
-      "unavailable-id": "That room code is already being hosted",
-      "peer-unavailable": "No open host was found for that room code",
+      "unavailable-id": "That cluster code is already being hosted",
+      "peer-unavailable": "No open host was found for that cluster code",
       network: "PeerJS signaling is unreachable",
       "webrtc": "The direct WebRTC connection failed",
     };

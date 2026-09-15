@@ -37,18 +37,29 @@ test("the legacy 0.6B url still points at the catalogue entry", () => {
 });
 
 test("profileModel reads real Qwen3 geometry out of a GGUF header", () => {
+  // Keyed by id, not by `params`: the three 4B entries share a parameter count,
+  // so a `params` lookup would silently profile whichever one sorts first.
   const expected = {
-    "0.6B": { layerCount: 28, hiddenSize: 1024 },
-    "1.7B": { layerCount: 28, hiddenSize: 2048 },
-    "4B": { layerCount: 36, hiddenSize: 2560 },
+    "qwen3-0.6b-q8_0": { shape: "0.6B", layerCount: 28, hiddenSize: 1024 },
+    "qwen3-1.7b-q8_0": { shape: "1.7B", layerCount: 28, hiddenSize: 2048 },
+    "qwen3-4b-q8_0": { shape: "4B", layerCount: 36, hiddenSize: 2560 },
+    // Same geometry as the Qwen-published 4B; only the fine-tune differs.
+    "qwen3-4b-instruct-2507-q8_0": { shape: "4B", layerCount: 36, hiddenSize: 2560 },
+    "qwen3-4b-thinking-2507-q8_0": { shape: "4B", layerCount: 36, hiddenSize: 2560 },
   } as const;
 
-  for (const [label, shape] of Object.entries(QWEN3_SHAPES)) {
-    const entry = requireModel(MODEL_CATALOGUE.find((m) => m.params === label)!.id);
-    const profile = profileModel(buildGGUFIndex(shape), entry);
+  assert.deepEqual(
+    MODEL_CATALOGUE.map((entry) => entry.id).sort(),
+    Object.keys(expected).sort(),
+    "every catalogue entry needs expected geometry here",
+  );
 
-    assert.equal(profile.layerCount, expected[label as keyof typeof expected].layerCount);
-    assert.equal(profile.hiddenSize, expected[label as keyof typeof expected].hiddenSize);
+  for (const [id, want] of Object.entries(expected)) {
+    const entry = requireModel(id);
+    const profile = profileModel(buildGGUFIndex(QWEN3_SHAPES[want.shape]), entry);
+
+    assert.equal(profile.layerCount, want.layerCount);
+    assert.equal(profile.hiddenSize, want.hiddenSize);
     assert.equal(profile.vocabSize, 151936);
     assert.equal(profile.layerBytes.length, profile.layerCount);
     assert.equal(
@@ -59,7 +70,7 @@ test("profileModel reads real Qwen3 geometry out of a GGUF header", () => {
     // Tensor bytes are the bulk of the file; the rest is header and tokenizer metadata.
     assert.ok(
       profile.totalBytes > entry.approxBytes * 0.95 && profile.totalBytes <= entry.approxBytes,
-      `${label}: profiled ${profile.totalBytes} is implausible against the ${entry.approxBytes}-byte file`,
+      `${id}: profiled ${profile.totalBytes} is implausible against the ${entry.approxBytes}-byte file`,
     );
   }
 });

@@ -1,5 +1,5 @@
 {
-  "name": "multideviceai",
+  "name": "localclusterai",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -11,7 +11,8 @@
     "preview": "vite preview --host 0.0.0.0",
     "typecheck": "tsc --noEmit",
     "test": "NODE_OPTIONS=--experimental-strip-types node --test \"tests/**/*.test.ts\"",
-    "test:e2e": "node tests/e2e/room.mjs",
+    "test:e2e": "node tests/e2e/cluster.mjs",
+    "test:e2e:metrics": "node tests/e2e/metrics.mjs",
     "verify": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {

@@ -40,7 +40,18 @@ export {
   shardDownloadBytes,
   shardTensorNames,
   tensorToF32,
+  type LoadWeightsOptions,
 } from "./gguf.ts";
+export {
+  estimateStorage,
+  MemoryWeightCache,
+  openWeightCache,
+  requestPersistentStorage,
+  type CachedRange,
+  type StorageEstimate,
+  type WeightCache,
+  type WeightCacheStats,
+} from "./weightCache.ts";
 export {
   createQwenTokenizer,
   tokenizerDefinitionFromGGUF,

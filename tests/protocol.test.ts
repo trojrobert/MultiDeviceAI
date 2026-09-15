@@ -60,6 +60,70 @@ test("hidden-state response decodes from an independently owned buffer", () => {
   assert.deepEqual(Array.from(decoded.values), [-2.5, 3.75]);
 });
 
+test("a response carries the peer's compute time and the request's phase", () => {
+  const encoded = encodeHiddenFrame({
+    kind: "response",
+    requestId: 12,
+    position: 3,
+    fingerprint: FINGERPRINT,
+    computeMicros: 18_430,
+    prefill: true,
+    values: new Float32Array([1, 2]),
+  });
+  const decoded = decodeHiddenFrame(encoded);
+  assert.equal(decoded.computeMicros, 18_430);
+  assert.equal(decoded.prefill, true);
+
+  // Without a reported compute time the host can only see a round trip, so the
+  // absent case must read as zero rather than as undefined arithmetic.
+  const bare = decodeHiddenFrame(
+    encodeHiddenFrame({
+      kind: "request",
+      requestId: 13,
+      position: 4,
+      fingerprint: FINGERPRINT,
+      values: new Float32Array([1]),
+    }),
+  );
+  assert.equal(bare.computeMicros, 0);
+  assert.equal(bare.prefill, false);
+});
+
+test("an absurd compute time clamps rather than wrapping around the u32", () => {
+  // A wrapped value would report a stalled peer as instantaneous, which is the
+  // one reading the panel must never show.
+  const decoded = decodeHiddenFrame(
+    encodeHiddenFrame({
+      kind: "response",
+      requestId: 1,
+      position: 0,
+      fingerprint: FINGERPRINT,
+      computeMicros: 8e9,
+      values: new Float32Array([1]),
+    }),
+  );
+  assert.equal(decoded.computeMicros, 0xffffffff);
+
+  for (const bogus of [Number.NaN, Number.POSITIVE_INFINITY, -5]) {
+    const frame = decodeHiddenFrame(
+      encodeHiddenFrame({
+        kind: "response",
+        requestId: 1,
+        position: 0,
+        fingerprint: FINGERPRINT,
+        computeMicros: bogus,
+        values: new Float32Array([1]),
+      }),
+    );
+    assert.equal(frame.computeMicros, 0, `computeMicros ${bogus}`);
+  }
+});
+
+test("the activation payload stays 8-byte aligned behind the header", () => {
+  // f32 views over the frame buffer depend on it, and the header grew in v3.
+  assert.equal(HIDDEN_FRAME_HEADER_BYTES % 8, 0);
+});
+
 test("hidden-state decoder rejects corrupt and truncated frames", () => {
   assert.throws(() => decodeHiddenFrame(new ArrayBuffer(4)), /shorter/);
   const frame = encodeHiddenFrame({
@@ -92,9 +156,11 @@ test("versioned control messages are accepted and unknown versions rejected", ()
   assert.equal(isControlMessage(message), true);
   assert.deepEqual(JSON.parse(JSON.stringify(message)).assignment, assignment);
 
-  // A peer on the previous protocol must be rejected outright: it would ignore
-  // modelUrl and silently load a different model.
+  // A peer on a previous protocol must be rejected outright: v1 would ignore
+  // modelUrl and silently load a different model, and v2 frames are eight bytes
+  // short of a v3 header.
   assert.equal(isControlMessage({ ...message, v: 1 }), false);
+  assert.equal(isControlMessage({ ...message, v: 2 }), false);
   assert.equal(isControlMessage({ v: PROTOCOL_VERSION, type: "surprise" }), false);
 });
 

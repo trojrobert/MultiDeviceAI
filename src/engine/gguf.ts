@@ -3,6 +3,7 @@
  */
 
 import { float16ToFloat32, repackQ8, Q8_BLOCK_BYTES, Q8_BLOCK_SIZE } from "./quant.ts";
+import type { WeightCache } from "./weightCache.ts";
 import type {
   F32Weight,
   GGUFIndex,
@@ -181,9 +182,26 @@ function contentRangeTotal(response: Response): number | undefined {
 
 export async function fetchGGUFIndex(
   url: string,
-  options: ParseGGUFOptions & { fetchFn?: typeof fetch; initialBytes?: number } = {},
+  options: ParseGGUFOptions & {
+    fetchFn?: typeof fetch;
+    initialBytes?: number;
+    cache?: WeightCache;
+  } = {},
 ): Promise<GGUFIndex> {
   const fetchFn = options.fetchFn ?? fetch;
+  const cache = options.cache;
+
+  // A 4B header is several MiB of tokenizer metadata. Re-parsing cached bytes
+  // is far cheaper than re-fetching them, and this runs on every model probe.
+  const cached = await cache?.getHeader(url);
+  if (cached) {
+    try {
+      return { ...parseGGUFHeader(bufferOf(cached), options), url };
+    } catch {
+      /* stale or truncated; fall through to the network */
+    }
+  }
+
   let size = options.initialBytes ?? 2 * 1024 * 1024;
   for (let attempt = 0; attempt < 8; attempt++) {
     const response = await fetchFn(url, { headers: { Range: `bytes=0-${size - 1}` } });
@@ -191,10 +209,12 @@ export async function fetchGGUFIndex(
     const bytes = await response.arrayBuffer();
     if (response.status === 200 && bytes.byteLength > size) {
       const index = parseGGUFHeader(bytes, options);
+      await storeHeader(cache, url, bytes, index.headerBytes);
       return { ...index, url };
     }
     try {
       const index = parseGGUFHeader(bytes, options);
+      await storeHeader(cache, url, bytes, index.headerBytes);
       return { ...index, url };
     } catch (error) {
       if (!(error instanceof RangeError)) throw error;
@@ -204,6 +224,29 @@ export async function fetchGGUFIndex(
     }
   }
   throw new Error("GGUF header exceeds the 256 MiB safety limit");
+}
+
+/**
+ * Store only as far as the parser actually read. The probe over-fetches by
+ * design — doubling until the header fits — so caching the whole response would
+ * spend quota on weight bytes that the tensor entries cache properly anyway.
+ */
+async function storeHeader(
+  cache: WeightCache | undefined,
+  url: string,
+  bytes: ArrayBuffer,
+  headerBytes: number,
+): Promise<void> {
+  if (!cache) return;
+  const end = Math.min(headerBytes, bytes.byteLength);
+  await cache.putHeader(url, new Uint8Array(bytes, 0, end));
+}
+
+/** A standalone ArrayBuffer for a view that may be a window onto a larger one. */
+function bufferOf(bytes: Uint8Array): ArrayBuffer {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? (bytes.buffer as ArrayBuffer)
+    : (bytes.slice().buffer as ArrayBuffer);
 }
 
 export async function fetchTensorRange(
@@ -329,12 +372,42 @@ export function shardDownloadBytes(index: GGUFIndex, role: ModelRole): number {
   }, 0);
 }
 
-async function loadWeight(index: GGUFIndex, name: string, fetchFn: typeof fetch): Promise<Weight> {
+/** Raw GGUF bytes for one tensor, and whether the cache supplied them. */
+async function tensorBytes(
+  index: GGUFIndex,
+  info: TensorInfo,
+  fetchFn: typeof fetch,
+  cache?: WeightCache,
+): Promise<{ bytes: Uint8Array; cached: boolean }> {
+  const url = index.url;
+  if (cache && url) {
+    const hit = await cache.get(url, info);
+    // Checked here rather than trusting the implementation: this is the one
+    // place that must never hand a short tensor to the engine, whatever cache
+    // is plugged in. A miss costs a re-fetch; a short tensor is silent garbage.
+    if (hit && hit.byteLength === info.byteLength) return { bytes: hit, cached: true };
+  }
+  const bytes = await fetchTensorRange(index, info, fetchFn);
+  // Storing is best-effort: a full quota must not fail a load that has already
+  // paid for the download.
+  if (cache && url) await cache.put(url, info, bytes).catch(() => {});
+  return { bytes, cached: false };
+}
+
+async function loadWeight(
+  index: GGUFIndex,
+  name: string,
+  fetchFn: typeof fetch,
+  cache?: WeightCache,
+): Promise<{ weight: Weight; cached: boolean }> {
   const info = index.tensors[name];
   if (!info) throw new Error(`missing tensor ${name}`);
-  const bytes = await fetchTensorRange(index, info, fetchFn);
-  if (info.shape.length === 2 && info.ggmlType === GGML_Q8_0) return repackQ8(info, bytes);
-  return { kind: "f32", shape: info.shape, data: tensorToF32(info, bytes) };
+  const { bytes, cached } = await tensorBytes(index, info, fetchFn, cache);
+  const weight: Weight =
+    info.shape.length === 2 && info.ggmlType === GGML_Q8_0
+      ? repackQ8(info, bytes)
+      : { kind: "f32", shape: info.shape, data: tensorToF32(info, bytes) };
+  return { weight, cached };
 }
 
 function requireF32(weight: Weight, name: string): F32Weight {
@@ -349,31 +422,54 @@ function requireF32(weight: Weight, name: string): F32Weight {
  */
 export const DEFAULT_FETCH_CONCURRENCY = 6;
 
+export interface LoadWeightsOptions {
+  fetchFn?: typeof fetch;
+  onProgress?: ProgressCallback;
+  concurrency?: number;
+  /** Persistent tensor store. Omitted, every tensor is fetched every session. */
+  cache?: WeightCache;
+}
+
 export async function loadModelWeights(
   index: GGUFIndex,
   role: ModelRole,
-  fetchFn: typeof fetch = fetch,
-  onProgress?: ProgressCallback,
-  concurrency: number = DEFAULT_FETCH_CONCURRENCY,
+  options: LoadWeightsOptions = {},
 ): Promise<ModelWeights> {
+  const { fetchFn = fetch, onProgress, cache } = options;
   const names = shardTensorNames(index, role);
   const totalBytes = shardDownloadBytes(index, role);
   let loadedBytes = 0;
+  let cachedBytes = 0;
+  let downloadedBytes = 0;
   const loaded = new Map<string, Weight>();
 
   let cursor = 0;
   const worker = async (): Promise<void> => {
     while (cursor < names.length) {
       const name = names[cursor++]!;
-      const weight = await loadWeight(index, name, fetchFn);
+      const { weight, cached } = await loadWeight(index, name, fetchFn, cache);
       loaded.set(name, weight);
-      loadedBytes += index.tensors[name]!.byteLength;
+      const bytes = index.tensors[name]!.byteLength;
+      loadedBytes += bytes;
+      if (cached) cachedBytes += bytes;
+      else downloadedBytes += bytes;
       // Progress is by bytes completed, so out-of-order arrival is fine; the
       // callback may throw to abort the load.
-      onProgress?.({ phase: "weights", loadedBytes, totalBytes, tensor: name });
+      onProgress?.({
+        phase: "weights",
+        loadedBytes,
+        totalBytes,
+        cachedBytes,
+        downloadedBytes,
+        tensor: name,
+        fromCache: cached,
+      });
     }
   };
-  const lanes = Math.max(1, Math.min(Math.floor(concurrency) || 1, names.length));
+  const lanes = Math.max(
+    1,
+    Math.min(Math.floor(options.concurrency ?? DEFAULT_FETCH_CONCURRENCY) || 1, names.length),
+  );
   await Promise.all(Array.from({ length: lanes }, worker));
 
   const take = (name: string): Weight => {

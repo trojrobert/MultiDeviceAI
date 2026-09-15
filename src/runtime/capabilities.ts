@@ -1,5 +1,5 @@
 /*
- * Device capability probing, shared by the room's fallback path and the real
+ * Device capability probing, shared by the cluster's fallback path and the real
  * engine adapter so the two cannot report different numbers for one device.
  */
 

@@ -5,8 +5,11 @@ import {
   probeCapabilities,
   resolveEngineFactory,
   type DistributedEngine,
+  type EngineCacheReport,
   type EngineFactory,
+  type RemoteHiddenResult,
 } from "./engine.ts";
+import { emptySummary, PerfRecorder, type PerfSummary } from "./metrics.ts";
 import { PeerTransport } from "./peer.ts";
 import {
   control,
@@ -17,7 +20,7 @@ import {
   type HiddenStateFrame,
   type LayerAssignment,
   type PeerPhase,
-  type RoomRole,
+  type ClusterRole,
   type TranscriptEntry,
 } from "./protocol.ts";
 
@@ -30,11 +33,14 @@ const HIDDEN_REQUEST_TIMEOUT_MS = 60_000;
 /** Must match `MAX_SEQUENCE_LENGTH` in the engine adapter; drives KV-cache estimates. */
 const MAX_SEQUENCE_LENGTH = 256;
 
+/** How often stage timings reach the UI while tokens are in flight. */
+const PERF_PUBLISH_INTERVAL_MS = 250;
+
 export type ModelPhase = "idle" | "probing" | "ready" | "error";
 
-export interface RoomSnapshot {
-  role?: RoomRole;
-  roomCode?: string;
+export interface ClusterSnapshot {
+  role?: ClusterRole;
+  clusterCode?: string;
   /** Models this build offers; empty until an engine is available. */
   catalogue: readonly ModelEntry[];
   modelId: string;
@@ -56,15 +62,19 @@ export interface RoomSnapshot {
   ready: boolean;
   generating: boolean;
   engineAvailable: boolean;
+  /** Stage timings for the most recent run; zeroed until a token has moved. */
+  perf: PerfSummary;
+  /** Persistent weight-cache occupancy; undefined until the engine reports it. */
+  cache?: EngineCacheReport;
   error?: string;
 }
 
-export interface RoomControllerOptions {
-  onChange(snapshot: Readonly<RoomSnapshot>): void;
+export interface ClusterControllerOptions {
+  onChange(snapshot: Readonly<ClusterSnapshot>): void;
   engineFactory?: EngineFactory;
 }
 
-export class RoomController {
+export class ClusterController {
   private transport?: PeerTransport;
   private engine?: DistributedEngine;
   private loadAbort?: AbortController;
@@ -73,23 +83,30 @@ export class RoomController {
   private pendingHidden = new Map<
     number,
     {
-      resolve: (values: Float32Array) => void;
+      resolve: (result: RemoteHiddenResult) => void;
       reject: (error: Error) => void;
       timeout: ReturnType<typeof setTimeout>;
+      /** `performance.now()` at send, and the framed size that went out. */
+      sentAt: number;
+      bytesOut: number;
     }
   >();
 
-  private state: RoomSnapshot;
-  private readonly options: RoomControllerOptions;
+  private state: ClusterSnapshot;
+  private readonly options: ClusterControllerOptions;
+  private readonly perf = new PerfRecorder();
+  /** Throttles snapshot emission while tokens are flowing; see `publishPerf`. */
+  private perfDirty = false;
+  private perfTimer?: ReturnType<typeof setTimeout>;
 
-  constructor(options: RoomControllerOptions) {
+  constructor(options: ClusterControllerOptions) {
     this.options = options;
     this.state = {
       localProgress: 0,
       remoteProgress: 0,
       localPhase: "connecting",
       remotePhase: "connecting",
-      status: "Create a room or join one from a shared link.",
+      status: "Create a cluster or join one from a shared link.",
       catalogue: [],
       modelId: DEFAULT_MODEL_ID,
       modelPhase: "idle",
@@ -97,25 +114,26 @@ export class RoomController {
       connected: false,
       ready: false,
       generating: false,
+      perf: emptySummary(),
       engineAvailable: Boolean(
         this.options.engineFactory ?? resolveEngineFactory(),
       ),
     };
   }
 
-  get snapshot(): Readonly<RoomSnapshot> {
+  get snapshot(): Readonly<ClusterSnapshot> {
     return this.state;
   }
 
-  async start(role: RoomRole, roomCode: string, label: string): Promise<void> {
+  async start(role: ClusterRole, clusterCode: string, label: string): Promise<void> {
     await this.leave();
     this.patch({
       role,
-      roomCode,
+      clusterCode,
       status:
         role === "host"
-          ? "Opening room…"
-          : `Looking for room ${roomCode}…`,
+          ? "Opening cluster…"
+          : `Looking for cluster ${clusterCode}…`,
       localPhase: "connecting",
       remotePhase: "connecting",
       localProgress: 0,
@@ -138,15 +156,17 @@ export class RoomController {
       catalogue: this.engine?.catalogue ?? [],
       engineAvailable: Boolean(this.engine),
     });
+    // Tells the user up front whether this session will re-download its shard.
+    void this.refreshCacheReport();
     const signal = new URLSearchParams(location.search).get("signal") ?? undefined;
     this.transport = new PeerTransport({
       role,
-      roomCode,
+      clusterCode,
       signal,
       events: {
         onOpen: () => this.onPeerOpen(),
         onControl: (message) => void this.onControl(message),
-        onHidden: (frame) => void this.onHidden(frame),
+        onHidden: (frame, byteLength) => void this.onHidden(frame, byteLength),
         onStatus: (status) => this.patch({ status }),
         onError: (error) => this.fail(error),
         onClose: () => this.onClose(),
@@ -160,15 +180,15 @@ export class RoomController {
       ? this.engine.getCapabilities(label)
       : probeCapabilities(label);
     void capabilityPromise.then((capabilities) => {
-      if (this.state.roomCode !== roomCode || this.state.role !== role) return;
+      if (this.state.clusterCode !== clusterCode || this.state.role !== role) return;
       this.patch({ localCapabilities: capabilities });
       if (this.state.connected) {
         this.send(control({ type: "hello", role, capabilities }));
       }
     }).catch((error) => {
-      if (this.state.roomCode !== roomCode || this.state.role !== role) return;
+      if (this.state.clusterCode !== clusterCode || this.state.role !== role) return;
       this.patch({
-        status: `Room connected; GPU probe failed: ${
+        status: `Cluster connected; GPU probe failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
       });
@@ -278,6 +298,8 @@ export class RoomController {
   async reset(): Promise<void> {
     this.generationAbort?.abort();
     await this.engine?.reset();
+    this.perf.reset();
+    this.flushPerf();
     this.patch({
       transcript: [],
       generating: false,
@@ -290,11 +312,14 @@ export class RoomController {
   async leave(): Promise<void> {
     this.loadAbort?.abort();
     this.generationAbort?.abort();
+    if (this.perfTimer) clearTimeout(this.perfTimer);
+    this.perfTimer = undefined;
+    this.perf.reset();
     this.transport?.close();
     this.transport = undefined;
     for (const pending of this.pendingHidden.values()) {
       clearTimeout(pending.timeout);
-      pending.reject(new Error("Room closed"));
+      pending.reject(new Error("Cluster closed"));
     }
     this.pendingHidden.clear();
     await this.engine?.dispose?.();
@@ -304,28 +329,57 @@ export class RoomController {
   requestWorkerHidden(
     values: Float32Array,
     position: number,
-  ): Promise<Float32Array> {
+    prefill = false,
+  ): Promise<RemoteHiddenResult> {
     const requestId = this.nextRequestId++;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingHidden.delete(requestId);
         reject(new Error(`Hidden-state request ${requestId} timed out`));
       }, HIDDEN_REQUEST_TIMEOUT_MS);
-      this.pendingHidden.set(requestId, { resolve, reject, timeout });
+      // Registered before the send so a synchronously delivered response — a
+      // loopback transport in a test — still finds its pending entry.
+      const pending = {
+        resolve,
+        reject,
+        timeout,
+        sentAt: performance.now(),
+        bytesOut: 0,
+      };
+      this.pendingHidden.set(requestId, pending);
       try {
-        this.transport?.sendHidden({
-          kind: "request",
-          requestId,
-          position,
-          fingerprint: this.state.localAssignment?.fingerprint ?? 0,
-          values,
-        });
+        pending.bytesOut =
+          this.transport?.sendHidden({
+            kind: "request",
+            requestId,
+            position,
+            prefill,
+            fingerprint: this.state.localAssignment?.fingerprint ?? 0,
+            values,
+          }) ?? 0;
       } catch (error) {
         clearTimeout(timeout);
         this.pendingHidden.delete(requestId);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  /** Read the persistent weight cache's occupancy into the snapshot. */
+  async refreshCacheReport(): Promise<void> {
+    if (!this.engine?.cacheReport) return;
+    try {
+      this.patch({ cache: await this.engine.cacheReport() });
+    } catch {
+      /* the readout is informational; a failure must not break the cluster */
+    }
+  }
+
+  /** Drop every cached tensor, then re-read the occupancy. */
+  async clearWeightCache(): Promise<void> {
+    if (!this.engine?.clearCache) return;
+    await this.engine.clearCache();
+    await this.refreshCacheReport();
   }
 
   private onPeerOpen(): void {
@@ -442,12 +496,14 @@ export class RoomController {
       this.patch({ localProgress: 1, localPhase: "ready" });
       this.send(control({ type: "ready", assignment }));
       this.updateReady();
+      // The shard just filled the cache, so the readout is stale.
+      void this.refreshCacheReport();
     } catch (error) {
       if (!this.loadAbort.signal.aborted) this.fail(error);
     }
   }
 
-  private async onHidden(frame: HiddenStateFrame): Promise<void> {
+  private async onHidden(frame: HiddenStateFrame, byteLength: number): Promise<void> {
     if (frame.kind === "response") {
       const pending = this.pendingHidden.get(frame.requestId);
       if (!pending) return;
@@ -463,7 +519,13 @@ export class RoomController {
         );
         return;
       }
-      pending.resolve(frame.values);
+      pending.resolve({
+        values: frame.values,
+        roundTripMicros: Math.max(0, Math.round((performance.now() - pending.sentAt) * 1000)),
+        workerMicros: frame.computeMicros ?? 0,
+        bytesOut: pending.bytesOut,
+        bytesIn: byteLength,
+      });
       return;
     }
     if (!this.engine || this.state.role !== "worker") {
@@ -499,11 +561,57 @@ export class RoomController {
     }
 
     try {
+      const started = performance.now();
       const values = await this.engine.runHidden(frame.values, frame.position);
-      this.transport?.sendHidden({ ...frame, kind: "response", values });
+      const computeMicros = Math.max(0, Math.round((performance.now() - started) * 1000));
+      const bytesOut =
+        this.transport?.sendHidden({
+          ...frame,
+          kind: "response",
+          values,
+          computeMicros,
+        }) ?? 0;
+      // The worker never runs `generate`, so this is the only place its own
+      // panel learns anything. The phase flag rides in on the request.
+      this.perf.record({
+        phase: frame.prefill ? "prefill" : "decode",
+        hostMicros: 0,
+        wireMicros: 0,
+        workerMicros: computeMicros,
+        headMicros: 0,
+        bytesOut,
+        bytesIn: byteLength,
+      });
+      this.publishPerf();
     } catch (error) {
       this.fail(error);
     }
+  }
+
+  /**
+   * Coalesce metric updates. A 4B prefill is hundreds of samples arriving back
+   * to back, and re-rendering the whole cluster for each one would cost more than
+   * the inference it is measuring.
+   */
+  private publishPerf(): void {
+    this.perfDirty = true;
+    if (this.perfTimer) return;
+    this.perfTimer = setTimeout(() => {
+      this.perfTimer = undefined;
+      if (!this.perfDirty) return;
+      this.perfDirty = false;
+      this.patch({ perf: this.perf.summary() });
+    }, PERF_PUBLISH_INTERVAL_MS);
+  }
+
+  /** Emit the final numbers immediately, rather than up to one interval late. */
+  private flushPerf(): void {
+    if (this.perfTimer) {
+      clearTimeout(this.perfTimer);
+      this.perfTimer = undefined;
+    }
+    this.perfDirty = false;
+    this.patch({ perf: this.perf.summary() });
   }
 
   private async generate(prompt: string): Promise<void> {
@@ -543,11 +651,17 @@ export class RoomController {
       return;
     }
     this.generationAbort = new AbortController();
+    this.perf.begin();
+    this.flushPerf();
     try {
       await this.engine.generate(this.state.transcript.slice(0, -1), {
         signal: this.generationAbort.signal,
-        runRemoteHidden: (hidden, position) =>
-          this.requestWorkerHidden(hidden, position),
+        runRemoteHidden: (hidden, position, prefill) =>
+          this.requestWorkerHidden(hidden, position, prefill),
+        onStage: (sample) => {
+          this.perf.record(sample);
+          this.publishPerf();
+        },
         onToken: (tokenId, text) => {
           this.applyToken({
             v: PROTOCOL_VERSION,
@@ -580,6 +694,10 @@ export class RoomController {
       );
     } catch (error) {
       if (!this.generationAbort.signal.aborted) this.fail(error);
+    } finally {
+      // The run's numbers stay on screen after it ends; only the live flag drops.
+      this.perf.end();
+      this.flushPerf();
     }
   }
 
@@ -658,7 +776,7 @@ export class RoomController {
     });
   }
 
-  private patch(patch: Partial<RoomSnapshot>): void {
+  private patch(patch: Partial<ClusterSnapshot>): void {
     this.state = { ...this.state, ...patch };
     this.emit();
   }

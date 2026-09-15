@@ -1,21 +1,44 @@
 /**
- * Room control and activation protocol for the two-peer POC.
+ * Cluster control and activation protocol for the two-peer POC.
  *
  * Version 2 carries the model with the assignment. A v1 peer would ignore
  * those fields and silently load a different model from the host, so the
  * version gate below turns that into a clean failure instead of garbage
  * output.
  *
- * The binary framing is original to MultiDeviceAI, with a separation between
+ * Version 3 widens the activation header from 24 to 32 bytes so a response can
+ * report how long the peer's own layers took. Without it the host can only
+ * measure a round trip, and cannot separate the network's cost from the peer's
+ * compute — the single number that says whether a split is worth making.
+ *
+ * The binary framing is original to LocalClusterAI, with a separation between
  * control messages and activation frames.
+ *
+ * Activation frame layout, 32-byte header then the f32 payload:
+ *
+ *   0   u32  magic, big-endian
+ *   4   u8   protocol version
+ *   5   u8   kind: 1 request, 2 response
+ *   6   u16  header length
+ *   8   u32  request id
+ *   12  u32  sequence position
+ *   16  u32  element count
+ *   20  u32  model fingerprint
+ *   24  u32  peer compute time, microseconds (responses only)
+ *   28  u8   flags: bit 0 set during prefill
+ *   29  …    reserved, zero
+ *
+ * The payload stays 8-byte aligned, as it was at 24.
  */
 
-export const PROTOCOL_VERSION = 2 as const;
-export const HIDDEN_FRAME_HEADER_BYTES = 24;
+export const PROTOCOL_VERSION = 3 as const;
+export const HIDDEN_FRAME_HEADER_BYTES = 32;
 
-const MAGIC = 0x4d444c4d; // "MDLM"
+const FLAG_PREFILL = 1 << 0;
 
-export type RoomRole = "host" | "worker";
+const MAGIC = 0x4c434149; // "LCAI"
+
+export type ClusterRole = "host" | "worker";
 export type PeerPhase =
   | "connecting"
   | "connected"
@@ -93,7 +116,7 @@ interface MessageBase {
 export type ControlMessage =
   | (MessageBase & {
       type: "hello";
-      role: RoomRole;
+      role: ClusterRole;
       capabilities: DeviceCapabilities;
     })
   | (MessageBase & { type: "assignment"; assignment: LayerAssignment })
@@ -134,6 +157,15 @@ export interface HiddenStateFrame {
   /** Model identity, checked by the receiver before it runs any layers. */
   fingerprint: number;
   values: Float32Array;
+  /**
+   * Microseconds the responding peer spent inside its own layers. Set on
+   * responses; 0 on requests. Lets the host bill the network for the round
+   * trip's remainder instead of attributing all of it to the wire or all of it
+   * to the peer.
+   */
+  computeMicros?: number;
+  /** True while the host is still walking the prompt, so both peers can label the phase. */
+  prefill?: boolean;
 }
 
 export function control<T extends ControlMessageInput>(
@@ -186,6 +218,10 @@ export function encodeHiddenFrame(frame: HiddenStateFrame): ArrayBuffer {
   view.setUint32(12, frame.position, true);
   view.setUint32(16, frame.values.length, true);
   view.setUint32(20, frame.fingerprint >>> 0, true);
+  // A u32 of microseconds tops out near 71 minutes; clamp rather than wrap, so
+  // a stalled peer reads as very slow instead of very fast.
+  view.setUint32(24, clampMicros(frame.computeMicros), true);
+  view.setUint8(28, frame.prefill ? FLAG_PREFILL : 0);
   new Uint8Array(buffer, HIDDEN_FRAME_HEADER_BYTES).set(
     new Uint8Array(
       frame.values.buffer,
@@ -227,6 +263,13 @@ export function decodeHiddenFrame(buffer: ArrayBuffer): HiddenStateFrame {
     requestId: view.getUint32(8, true),
     position: view.getUint32(12, true),
     fingerprint: view.getUint32(20, true),
+    computeMicros: view.getUint32(24, true),
+    prefill: (view.getUint8(28) & FLAG_PREFILL) !== 0,
     values: new Float32Array(copy.buffer),
   };
+}
+
+function clampMicros(micros: number | undefined): number {
+  if (!Number.isFinite(micros ?? 0)) return 0;
+  return Math.min(0xffffffff, Math.max(0, Math.round(micros ?? 0)));
 }

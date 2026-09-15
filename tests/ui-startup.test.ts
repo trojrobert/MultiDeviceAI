@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { RoomController } from "../src/runtime/room.ts";
+import { ClusterController } from "../src/runtime/cluster.ts";
 
-test("RoomController construction does not emit before the UI is mounted", () => {
+test("ClusterController construction does not emit before the UI is mounted", () => {
   let emissions = 0;
-  const room = new RoomController({
+  const cluster = new ClusterController({
     onChange: () => {
       emissions++;
     },
   });
 
   assert.equal(emissions, 0);
-  assert.equal(room.snapshot.role, undefined);
-  assert.equal(room.snapshot.status, "Create a room or join one from a shared link.");
+  assert.equal(cluster.snapshot.role, undefined);
+  assert.equal(cluster.snapshot.status, "Create a cluster or join one from a shared link.");
 });

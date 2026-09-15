@@ -35,18 +35,21 @@ try {
   }
 
   await host.goto(baseURL);
-  await host.locator("#create-room").click();
-  await host.locator("#room-view").waitFor({ state: "visible" });
-  const roomCode = (await host.locator("#room-code-display").textContent())?.trim();
-  assert.match(roomCode ?? "", /^[A-Z2-9]{6}$/);
+  await host.locator("#create-cluster").click();
+  await host.locator("#cluster-view").waitFor({ state: "visible" });
+  const clusterCode = (await host.locator("#cluster-code-display").textContent())?.trim();
+  assert.match(clusterCode ?? "", /^[A-Z2-9]{6}$/);
   assert.equal(await host.locator("#role-display").textContent(), "Host");
 
-  await worker.goto(`${baseURL}/?room=${roomCode}`);
-  await worker.locator("#join-room").click();
-  await worker.locator("#room-view").waitFor({ state: "visible" });
+  await worker.goto(`${baseURL}/?cluster=${clusterCode}`);
+  await worker.locator("#join-cluster").click();
+  await worker.locator("#cluster-view").waitFor({ state: "visible" });
   assert.equal(await worker.locator("#role-display").textContent(), "Worker");
 
   // The host picks the model; the worker is told what to load.
+  // The inspector shows one group at a time; the model picker is in "Model &
+  // split", which is where a freshly paired host is sent.
+  await host.locator('[data-inspect="model"]').click();
   await host.locator("#model-card").waitFor({ state: "visible" });
   assert.ok(
     (await host.locator("#model-select option").count()) > 1,
@@ -69,13 +72,13 @@ try {
   } catch (error) {
     const state = {
       host: {
-        status: await host.locator("#room-status").textContent(),
+        status: await host.locator("#cluster-status").textContent(),
         joinStatus: await host.locator("#join-status").textContent(),
         remote: await host.locator("#remote-name").textContent(),
         error: await host.locator("#error-banner").textContent(),
       },
       worker: {
-        status: await worker.locator("#room-status").textContent(),
+        status: await worker.locator("#cluster-status").textContent(),
         joinStatus: await worker.locator("#join-status").textContent(),
         remote: await worker.locator("#remote-name").textContent(),
         error: await worker.locator("#error-banner").textContent(),
@@ -85,13 +88,13 @@ try {
     throw new Error(`${error.message}\n${JSON.stringify(state, null, 2)}`);
   }
 
-  const hostStatus = await host.locator("#room-status").textContent();
-  const workerStatus = await worker.locator("#room-status").textContent();
+  const hostStatus = await host.locator("#cluster-status").textContent();
+  const workerStatus = await worker.locator("#cluster-status").textContent();
   assert.match(hostStatus ?? "", /Worker connected|Confirm the layer split/i);
   assert.match(workerStatus ?? "", /Connected to host|Waiting for layer assignment/i);
 
   if (errors.length > 0) throw new Error(errors.join("\n"));
-  console.log(`room smoke passed: ${roomCode}`);
+  console.log(`cluster smoke passed: ${clusterCode}`);
 } finally {
   await browser.close();
 }

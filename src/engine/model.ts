@@ -35,6 +35,19 @@ export interface ModelEntry {
  *
  * Qwen3 8B Q8_0 exists (8.71 GB) but is omitted: without persistent weight
  * caching the download is impractical in a browser session.
+ *
+ * The 2507 pair comes from unsloth rather than Qwen because that is where the
+ * single-file Q8_0 build lives. Both were probed with `fetchGGUFIndex`: they
+ * report `general.architecture = qwen3` and carry the `attn_q_norm`/
+ * `attn_k_norm` tensors `qwenLayerTensorNames` requires, with the same 253
+ * Q8_0 / 145 F32 tensor split as the Qwen-published 4B. They advertise a
+ * 262144 context, but `DenseQwen3Engine` clamps to `min(512, contextLength)`,
+ * so the KV cache costs the same as every other entry here.
+ *
+ * unsloth's plain Qwen3-0.6B/1.7B/4B GGUFs are deliberately absent: they are
+ * re-uploads of the weights Qwen already publishes above (byte sizes match to
+ * within ~1 KB of header metadata), so listing them would only duplicate the
+ * picker.
  */
 export const MODEL_CATALOGUE: readonly ModelEntry[] = [
   {
@@ -60,6 +73,22 @@ export const MODEL_CATALOGUE: readonly ModelEntry[] = [
     url: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q8_0.gguf",
     quantization: "Q8_0",
     approxBytes: 4_280_404_704,
+  },
+  {
+    id: "qwen3-4b-instruct-2507-q8_0",
+    label: "Qwen3 4B Instruct 2507",
+    params: "4B",
+    url: "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q8_0.gguf",
+    quantization: "Q8_0",
+    approxBytes: 4_280_405_600,
+  },
+  {
+    id: "qwen3-4b-thinking-2507-q8_0",
+    label: "Qwen3 4B Thinking 2507",
+    params: "4B",
+    url: "https://huggingface.co/unsloth/Qwen3-4B-Thinking-2507-GGUF/resolve/main/Qwen3-4B-Thinking-2507-Q8_0.gguf",
+    quantization: "Q8_0",
+    approxBytes: 4_280_405_632,
   },
 ];
 
@@ -194,11 +223,16 @@ export async function loadQwen3Engine(options: EngineLoadOptions): Promise<Loade
   const index = options.index ?? await fetchGGUFIndex(modelUrl, {
     fetchFn,
     skipTokenizer: !options.role.hasEmbedding,
+    cache: options.cache,
   });
   const config = qwen3ConfigFromGGUF(index);
   validateRole(options.role, config.layerCount);
   const downloadBytes = shardDownloadBytes(index, options.role);
-  const weights = await loadModelWeights(index, options.role, fetchFn, options.onProgress);
+  const weights = await loadModelWeights(index, options.role, {
+    fetchFn,
+    onProgress: options.onProgress,
+    cache: options.cache,
+  });
   const engine = await DenseQwen3Engine.create({
     device: options.device,
     config,

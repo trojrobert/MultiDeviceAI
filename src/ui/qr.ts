@@ -1,8 +1,8 @@
 /**
  * Minimal QR encoder: byte mode, error-correction level L, versions 1–10.
  *
- * Written from scratch to keep MultiDeviceAI dependency-free. Capacity tops
- * out at 271 bytes, which comfortably covers any room invite URL.
+ * Written from scratch to keep LocalClusterAI dependency-free. Capacity tops
+ * out at 271 bytes, which comfortably covers any cluster invite URL.
  */
 
 interface VersionSpec {
@@ -403,7 +403,7 @@ export function qrToSvg(code: QRCode, margin = 2): string {
   }
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${span} ${span}" ` +
-    `shape-rendering="crispEdges" role="img" aria-label="Room invite QR code">` +
+    `shape-rendering="crispEdges" role="img" aria-label="Cluster invite QR code">` +
     `<rect width="${span}" height="${span}" fill="#fff"/>` +
     `<path d="${path}" fill="#000"/>` +
     `</svg>`

@@ -1,4 +1,4 @@
-# MultiDeviceAI
+# LocalClusterAI
 
 A browser POC that physically splits a **Qwen3 Q8_0** model between two WebGPU
 devices and chats through the combined model over WebRTC.
@@ -18,19 +18,27 @@ its real shape, then measured against both devices' memory budgets:
 | Qwen3 0.6B Q8_0 | 639 MB | 28 | 1024 | fits on one device |
 | Qwen3 1.7B Q8_0 | 1.83 GB | 28 | 2048 | fits on one device |
 | Qwen3 4B Q8_0 | 4.28 GB | 36 | 2560 | **needs both devices** |
+| Qwen3 4B Instruct 2507 Q8_0 | 4.28 GB | 36 | 2560 | **needs both devices** |
+| Qwen3 4B Thinking 2507 Q8_0 | 4.28 GB | 36 | 2560 | **needs both devices** |
 
 4B is the point of the project: at roughly 4.05 GB of weights, KV caches, and
 working buffers it does not fit in either browser alone, so the split stops
 being a demonstration and becomes the only way to run it.
 
+The two 2507 fine-tunes are pulled from unsloth, which publishes them as
+single-file Q8_0 GGUFs. They share the 4B geometry exactly, so they split the
+same way. Their headers advertise a 262144 context, but the engine clamps to
+`min(512, contextLength)` like every other entry.
+
 The catalogue is Q8_0-only. The loader repacks 2-D Q8_0 tensors and dequantizes
 everything else to f32; there is no K-quant path, so a Q4_K entry would fail at
-load.
+load. Entries must also be Qwen3 proper: the layer loader requires the
+`attn_q_norm`/`attn_k_norm` tensors, so a Llama- or Gemma-architecture GGUF
+would fail even at Q8_0.
 
 > This is an experimental correctness-first POC. It supports exactly one host
 > and one worker, greedy decoding, a 256-token context, and a 64-token answer.
-> It has not yet been validated against golden logits on every GPU/browser, and
-> weights are **not cached** — every session re-downloads its shard.
+> It has not yet been validated against golden logits on every GPU/browser.
 
 ## Try it on a laptop first
 
@@ -40,7 +48,7 @@ npm run dev
 ```
 
 Open the printed localhost URL in a WebGPU-capable browser. The application is
-the room/chat interface; there is no longer a vector-add demo.
+the cluster/chat interface; there is no longer a vector-add demo.
 
 ## Deploy it
 
@@ -102,16 +110,16 @@ Open the **same HTTPS URL** on both devices, in a WebGPU-capable browser
 (Chrome/Edge on desktop and Android; Safari on iOS 26+ or with the WebGPU flag
 enabled). Then:
 
-1. **Laptop:** open the URL, click **Create room**, then **Copy invite**.
+1. **Laptop:** open the URL, click **Create cluster**, then **Copy invite**.
 2. **Phone:** open the invite link (send it to yourself via chat/notes, or type
-   the room code shown on the laptop).
-3. **Phone:** tap **Join room**.
+   the cluster code shown on the laptop).
+3. **Phone:** tap **Join cluster**.
 4. **Laptop:** pick a model. The card reports whether it fits on one device or
    needs both, and each device shows an editable **memory budget** — the browser
    exposes no real VRAM figure, so correct it if a load fails.
 5. **Laptop:** choose a split (`14` means laptop layers 0–13 and phone layers
    14–27) and click **Assign & load**. **By device power** picks the split with
-   the most headroom on the tighter device; **Balance** evens out the two
+   the most headXCLUSTERPLACEHOLDERX on the tighter device; **Balance** evens out the two
    downloads. A split that does not fit is refused, and the button says which
    device is short.
 6. Each peer range-downloads only its assigned Qwen tensors. For 0.6B at a 14/14
@@ -121,7 +129,13 @@ enabled). Then:
 7. Wait until both model cards say **ready**, then chat from either device. Use
    **Stop** to interrupt generation and **Reset** to clear the conversation.
 
-Both devices must run the **same build**: the room protocol is versioned, and a
+Weights are cached, so step 6 is a one-time cost per device per model. The
+**Weights** card shows how much of this device's shard is stored; a later
+session restores it instead of downloading, and the status line says
+"restored from cache" rather than "downloading". The **Performance** card
+appears with the first token.
+
+Both devices must run the **same build**: the cluster protocol is versioned, and a
 peer on a cached older bundle is rejected with a message telling you to reload,
 rather than silently loading a different model.
 
@@ -146,6 +160,45 @@ During prompt prefill, both peers build the KV caches for only their own layers.
 The host runs the LM head only after the final prompt token and each generated
 token.
 
+## Weight caching
+
+Every tensor is stored in Cache Storage under its `(model URL, tensor name,
+byte range)` key, so a second session restores its shard instead of
+re-downloading it — at 4B that is roughly 2.2 GB on the host and 1.8 GB on the
+worker saved per session. Parsed GGUF headers are cached the same way, which
+also makes the model picker's probe instant after the first look.
+
+Keying on the byte range means a re-published GGUF that moves a tensor misses
+rather than returning the wrong bytes, and the loader re-checks every entry's
+length before use, so a truncated or partially evicted entry is re-fetched
+rather than handed to the engine. The app asks for persistent storage so a
+shard is not evicted because a background tab needed XCLUSTERPLACEHOLDERX.
+
+Caching degrades quietly rather than failing: an insecure origin, private
+browsing, or a full quota all just mean tensors are fetched as before. The
+**Weights** card says which of those you are in, and can clear the store.
+
+## Performance panel
+
+Each token is attributed to four stages, so the cost of splitting is visible
+rather than assumed:
+
+| Stage | What it covers |
+| --- | --- |
+| Host layers | Embedding and the host's own layer range |
+| Network | The round trip minus the peer's reported compute |
+| Peer layers | The worker's layer range, timed on the worker itself |
+| Head + sample | Final norm, LM head, and sampling |
+
+The worker times its own layers and reports that figure in the activation
+response, which is what protocol v3 widened the frame header for. Without it
+the host can only see a round trip and cannot tell a slow peer from a slow
+link — the one distinction that decides whether a given split is worth making.
+
+The panel also reports tokens per second, time to first token, per-token
+latency over a recent window, and activation bytes per token in each direction.
+The worker sees its own panel, fed by the frames it answered.
+
 ## Architecture
 
 ```text
@@ -158,16 +211,18 @@ src/engine/
   denseEngine.ts      layer-range execution and local KV caches
   model.ts            model catalogue, GGUF profiling, role-aware shard loader
   placement.ts        memory budgets, feasibility verdicts, split selection
-  runtimeAdapter.ts   chat/runtime integration and generation loop
+  weightCache.ts      persistent per-tensor store, keyed by model and byte range
+  runtimeAdapter.ts   chat/runtime integration and instrumented generation loop
 
 src/runtime/
   capabilities.ts     shared WebGPU capability and memory-budget probing
+  metrics.ts          per-token stage accounting and run summaries
   peer.ts             PeerJS signaling and WebRTC transport
   protocol.ts         versioned controls and binary f32 activation frames
-  room.ts             two-peer assignment, readiness, and request correlation
+  cluster.ts             two-peer assignment, readiness, and request correlation
 
 src/ui/
-  app.ts              room controls and shared chat rendering
+  app.ts              cluster controls and shared chat rendering
   styles.css          responsive laptop/phone interface
 ```
 
@@ -180,28 +235,30 @@ npm run verify
 ```
 
 This runs strict TypeScript checking, CPU tests for GGUF/Q8/tokenization, the
-shard loader, head chunking, the model catalogue, capacity placement and the
-wire protocol, then a production build. Browser GPU execution must be tested on
-real hardware.
+shard loader, head chunking, the model catalogue, capacity placement, the
+weight cache, per-token metrics and the wire protocol, then a production build.
+Browser GPU execution must be tested on real hardware.
 
-There is also a two-browser transport smoke test, which needs a running
-preview server:
+There are also two-browser smoke tests, which need a running preview server:
 
 ```bash
 npm run preview &
-npm run test:e2e
+npm run test:e2e           # cluster creation, pairing, capability exchange
+npm run test:e2e:metrics   # v3 activation frames and the performance panel
 ```
+
+The metrics test stubs the engine at the cluster's boundary, so it exercises real
+WebRTC frames, the worker's compute reporting, and the panel without needing a
+GPU or a multi-gigabyte download.
 
 ## Current limitations
 
 - Exactly two peers; no reconnect recovery or automatic multi-device planner.
-- Qwen3 0.6B Q8_0 only.
-- Tensor loading is range-based but does not yet persist weights in Cache API.
 - Decode performs CPU readback each token and has no batched prefill or
-  speculative decoding.
+  speculative decoding, so prefill costs one round trip per prompt token.
 - No TURN credentials are bundled.
 - Activations are sent as exact f32 for correctness, not compressed f16.
 
 ## License
 
-Apache-2.0 for MultiDeviceAI code.
+Apache-2.0 for LocalClusterAI code.

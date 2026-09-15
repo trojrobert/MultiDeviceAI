@@ -2,7 +2,7 @@ import { mountApp } from "./ui/app.ts";
 import "./ui/styles.css";
 import { createQwenRuntimeEngine } from "./engine/runtimeAdapter.ts";
 
-window.__MULTIDEVICE_AI_ENGINE_FACTORY__ = createQwenRuntimeEngine;
+window.__LOCAL_CLUSTER_AI_ENGINE_FACTORY__ = createQwenRuntimeEngine;
 
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("Missing #app root");

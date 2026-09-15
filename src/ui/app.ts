@@ -1,43 +1,58 @@
-import { createRoomCode, normalizeRoomCode } from "../runtime/peer.ts";
-import { RoomController, type RoomSnapshot } from "../runtime/room.ts";
+import { formatCount, formatMicros, STAGE_NAMES } from "../runtime/metrics.ts";
+import { createClusterCode, normalizeClusterCode } from "../runtime/peer.ts";
+import { ClusterController, type ClusterSnapshot } from "../runtime/cluster.ts";
 import type { DeviceCapabilities } from "../runtime/protocol.ts";
 import type { PlacementResult, SplitCandidate } from "../engine/placement.ts";
+import { ClusterCanvas, type NodeTarget } from "./canvas.ts";
 import { encodeQR, qrToSvg } from "./qr.ts";
 
-const THEME_KEY = "mdai-theme";
-const NAME_KEY = "mdllm-device-name";
-const BUDGET_KEY = "mdai-memory-budget";
-const COLLAPSED_KEY = "mdai-collapsed-cards";
+const THEME_KEY = "lcai-theme";
+const NAME_KEY = "lcai-device-name";
+const BUDGET_KEY = "lcai-memory-budget";
 
 type Theme = "dark" | "light";
+
+/**
+ * Which set of controls the inspector is showing. The canvas is the primary
+ * surface and the inspector holds the detail of whatever is selected on it, so
+ * exactly one group is visible at a time rather than a permanent stack of
+ * every setting the application has.
+ */
+type Group = "devices" | "model" | "perf" | "session";
+
+const GROUP_TITLES: Record<Group, string> = {
+  devices: "Devices",
+  model: "Model & split",
+  perf: "Performance",
+  session: "Session",
+};
 
 export function mountApp(root: HTMLElement): () => void {
   root.innerHTML = shell();
 
-  const room = new RoomController({ onChange: render });
-  let snapshot = room.snapshot;
+  const cluster = new ClusterController({ onChange: render });
+  let snapshot = cluster.snapshot;
   let budgetRestored = false;
 
   // ── Element handles ─────────────────────────────────────────────────────
   const joinView = get("join-view");
-  const roomView = get("room-view");
+  const clusterView = get("cluster-view");
   const nameInput = input("device-name");
-  const codeInput = input("room-code");
+  const codeInput = input("cluster-code");
   const joinStatus = get("join-status");
-  const createButton = button("create-room");
-  const joinButton = button("join-room");
+  const createButton = button("create-cluster");
+  const joinButton = button("join-cluster");
   const themeToggle = button("theme-toggle");
   const copyButton = button("copy-link");
   const shareButton = button("share-link");
   const inviteLink = get("invite-link");
   const qrHolder = get("qr-holder");
   const invitePanel = get("invite-panel");
-  const ribbon = get("layer-ribbon");
-  const ribbonCells = get("ribbon-cells");
+  const stageCaption = get("stage-caption");
+  const chatLayer = get("chat-layer");
   const assignButton = button("assign-layers");
   const balanceButton = button("balance-split");
   const modelSelect = get("model-select") as HTMLSelectElement;
-  const localBudgetInput = get("local-budget") as HTMLInputElement;
   const loadSlider = input("load-slider");
   const loadEvenButton = button("load-even");
   const loadPowerButton = button("load-power");
@@ -45,21 +60,28 @@ export function mountApp(root: HTMLElement): () => void {
   const promptInput = get("prompt-input") as HTMLTextAreaElement;
   const stopButton = button("stop-generation");
   const resetButton = button("reset-chat");
+  const leaveButton = button("leave-cluster");
   const transcriptEl = get("transcript");
-  const clusterToggle = button("cluster-toggle");
-  const sheetBackdrop = get("sheet-backdrop");
+  const inspector = get("inspector");
+  const inspectorToggle = button("inspector-toggle");
+  const inspectorClose = button("inspector-close");
+  const scrim = get("scrim");
+  const clearCacheButton = button("clear-cache");
   const toasts = get("toasts");
+  const canvasEl = get("canvas");
+  const canvas = new ClusterCanvas(canvasEl as unknown as SVGSVGElement);
 
   // ── Local UI state ──────────────────────────────────────────────────────
   let proposedSplit = 0;
-  let ribbonLayerCount = 0;
+  let layerCount = 0;
   let dragging = false;
   let lastInviteCode = "";
-  let generationStart = 0;
-  let tokenCount = 0;
-  let lastPendingText = "";
-  let wasGenerating = false;
-  let tokenTimes: number[] = [];
+  let group: Group = "devices";
+  let modelGroupOffered = false;
+  let selected: NodeTarget | undefined;
+  // The inspector is docked beside the canvas on a wide screen and a sheet on
+  // a narrow one, so it starts open only where it costs no canvas.
+  let inspectorOpen = !window.matchMedia?.("(max-width: 900px)").matches;
 
   // ── Theme ───────────────────────────────────────────────────────────────
   const storedTheme = localStorage.getItem(THEME_KEY);
@@ -86,12 +108,12 @@ export function mountApp(root: HTMLElement): () => void {
     );
     document
       .querySelector('meta[name="theme-color"]')
-      ?.setAttribute("content", theme === "dark" ? "#07090F" : "#EEF1F7");
+      ?.setAttribute("content", theme === "dark" ? "#0A0A0B" : "#F6F6F7");
   }
 
   // ── Join view ───────────────────────────────────────────────────────────
-  const urlCode = normalizeRoomCode(
-    new URLSearchParams(location.search).get("room") ?? "",
+  const urlCode = normalizeClusterCode(
+    new URLSearchParams(location.search).get("cluster") ?? "",
   );
   if (urlCode) codeInput.value = urlCode;
   nameInput.value =
@@ -99,27 +121,27 @@ export function mountApp(root: HTMLElement): () => void {
     (/Mobi|Android/i.test(navigator.userAgent) ? "Phone" : "Laptop");
 
   if (urlCode) {
-    joinStatus.textContent = `Invite for room ${urlCode} detected. Join to become the worker.`;
+    joinStatus.textContent = `Invite for cluster ${urlCode} detected. Join to become the worker.`;
     joinButton.classList.add("primary");
     createButton.classList.remove("primary");
   }
 
   createButton.addEventListener("click", () => {
-    const code = createRoomCode();
+    const code = createClusterCode();
     codeInput.value = code;
     void start("host", code);
   });
   joinButton.addEventListener("click", () => {
-    const code = normalizeRoomCode(codeInput.value);
+    const code = normalizeClusterCode(codeInput.value);
     if (!code) {
-      joinStatus.textContent = "Enter the room code shown on the host.";
+      joinStatus.textContent = "Enter the cluster code shown on the host.";
       codeInput.focus();
       return;
     }
     void start("worker", code);
   });
   codeInput.addEventListener("input", () => {
-    codeInput.value = normalizeRoomCode(codeInput.value);
+    codeInput.value = normalizeClusterCode(codeInput.value);
   });
   codeInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") joinButton.click();
@@ -130,9 +152,9 @@ export function mountApp(root: HTMLElement): () => void {
     localStorage.setItem(NAME_KEY, name);
     setJoinBusy(true);
     try {
-      await room.start(role, code, name);
+      await cluster.start(role, code, name);
       const url = new URL(location.href);
-      url.searchParams.set("room", code);
+      url.searchParams.set("cluster", code);
       history.replaceState({}, "", url);
     } catch (error) {
       joinStatus.textContent = message(error);
@@ -150,7 +172,7 @@ export function mountApp(root: HTMLElement): () => void {
   // ── Invite sharing ──────────────────────────────────────────────────────
   function inviteUrl(): string {
     const url = new URL(location.href);
-    url.searchParams.set("room", snapshot.roomCode ?? "");
+    url.searchParams.set("cluster", snapshot.clusterCode ?? "");
     url.hash = "";
     return url.toString();
   }
@@ -169,8 +191,8 @@ export function mountApp(root: HTMLElement): () => void {
     const url = inviteUrl();
     try {
       await navigator.share({
-        title: "MultiDevice AI",
-        text: "Join my split-model room",
+        title: "LocalCluster AI",
+        text: "Join my split-model cluster",
         url,
       });
     } catch {
@@ -178,21 +200,72 @@ export function mountApp(root: HTMLElement): () => void {
     }
   });
 
-  // ── Layer ribbon ────────────────────────────────────────────────────────
-  function ensureRibbon(layerCount: number): void {
-    if (ribbonLayerCount === layerCount) return;
-    ribbonLayerCount = layerCount;
-    const fragment = document.createDocumentFragment();
-    for (let i = 0; i < layerCount; i++) {
-      const cell = document.createElement("span");
-      cell.className = "layer";
-      cell.title = `Layer ${i}`;
-      fragment.append(cell);
-    }
-    ribbonCells.replaceChildren(fragment);
+  leaveButton.addEventListener("click", () => {
+    void cluster.leave();
+    const url = new URL(location.href);
+    url.searchParams.delete("cluster");
+    history.replaceState({}, "", url);
+    setJoinBusy(false);
+  });
+
+  // ── Inspector ───────────────────────────────────────────────────────────
+  function setGroup(next: Group, open = true): void {
+    group = next;
+    inspectorOpen = open;
+    applyInspector();
   }
 
-  function ribbonInteractive(next: Readonly<RoomSnapshot>): boolean {
+  function applyInspector(): void {
+    inspector.hidden = !inspectorOpen;
+    clusterView.classList.toggle("inspector-open", inspectorOpen);
+    inspectorToggle.setAttribute("aria-expanded", String(inspectorOpen));
+    text("inspector-title", GROUP_TITLES[group]);
+    for (const chip of root.querySelectorAll<HTMLElement>("[data-inspect]")) {
+      const on = inspectorOpen && chip.dataset.inspect === group;
+      chip.classList.toggle("on", on);
+      chip.setAttribute("aria-pressed", String(on));
+    }
+    paintPanels();
+  }
+
+  /** A panel shows when its group is selected and its own data exists. */
+  function paintPanels(): void {
+    const next = snapshot;
+    const tokens = next.perf.promptTokens + next.perf.decodeTokens;
+    const available: Record<string, boolean> = {
+      "model-card": next.role === "host" && next.catalogue.length > 0,
+      "cache-card": next.engineAvailable && Boolean(next.cache),
+      telemetry: tokens > 0,
+    };
+    for (const panel of root.querySelectorAll<HTMLElement>(".panel[data-group]")) {
+      const owner = panel.dataset.group as Group;
+      panel.hidden = !inspectorOpen || owner !== group || available[panel.id] === false;
+    }
+  }
+
+  inspectorToggle.addEventListener("click", () => {
+    inspectorOpen = !inspectorOpen;
+    applyInspector();
+  });
+  inspectorClose.addEventListener("click", () => {
+    inspectorOpen = false;
+    applyInspector();
+  });
+  scrim.addEventListener("click", () => {
+    inspectorOpen = false;
+    applyInspector();
+  });
+  for (const chip of root.querySelectorAll<HTMLElement>("[data-inspect]")) {
+    chip.addEventListener("click", () => {
+      const target = chip.dataset.inspect as Group;
+      // Pressing the group already showing closes the panel, so the canvas can
+      // be cleared without hunting for a close button.
+      setGroup(target, !(inspectorOpen && group === target));
+    });
+  }
+
+  // ── Canvas: selection and the split drag ────────────────────────────────
+  function splitInteractive(next: Readonly<ClusterSnapshot>): boolean {
     return (
       next.role === "host" &&
       next.connected &&
@@ -202,43 +275,56 @@ export function mountApp(root: HTMLElement): () => void {
     );
   }
 
-  function splitFromPointer(clientX: number): number {
-    const rect = ribbonCells.getBoundingClientRect();
-    if (rect.width === 0) return proposedSplit;
-    const ratio = (clientX - rect.left) / rect.width;
-    return clamp(Math.round(ratio * ribbonLayerCount), 1, ribbonLayerCount - 1);
-  }
-
   function setSplit(value: number): void {
-    const next = clamp(value, 1, Math.max(1, ribbonLayerCount - 1));
+    const next = clamp(value, 1, Math.max(1, layerCount - 1));
     if (next === proposedSplit) return;
     proposedSplit = next;
-    paintRibbon(snapshot);
+    paintCanvas(snapshot);
+    paintSplit(snapshot);
   }
 
-  ribbon.addEventListener("pointerdown", (event) => {
-    if (!ribbonInteractive(snapshot)) return;
-    dragging = true;
-    ribbon.setPointerCapture(event.pointerId);
-    setSplit(splitFromPointer(event.clientX));
-    event.preventDefault();
+  canvasEl.addEventListener("pointerdown", (event) => {
+    const target = canvas.targetAt(event);
+    // Empty canvas clears the selection, so the highlight always names what
+    // the inspector is currently showing.
+    if (!target) {
+      if (selected === undefined) return;
+      selected = undefined;
+      paintCanvas(snapshot);
+      return;
+    }
+    selected = target;
+    if (target === "split") {
+      setGroup("model");
+      if (!splitInteractive(snapshot)) {
+        paintCanvas(snapshot);
+        return;
+      }
+      dragging = true;
+      canvasEl.setPointerCapture(event.pointerId);
+      setSplit(canvas.splitFromPointer(event.clientX, event.clientY, proposedSplit));
+      event.preventDefault();
+    } else {
+      setGroup("devices");
+    }
+    paintCanvas(snapshot);
   });
-  ribbon.addEventListener("pointermove", (event) => {
+  canvasEl.addEventListener("pointermove", (event) => {
     if (!dragging) return;
-    setSplit(splitFromPointer(event.clientX));
+    setSplit(canvas.splitFromPointer(event.clientX, event.clientY, proposedSplit));
   });
   const endDrag = (event: PointerEvent) => {
     if (!dragging) return;
     dragging = false;
-    if (ribbon.hasPointerCapture(event.pointerId)) {
-      ribbon.releasePointerCapture(event.pointerId);
+    if (canvasEl.hasPointerCapture(event.pointerId)) {
+      canvasEl.releasePointerCapture(event.pointerId);
     }
   };
-  ribbon.addEventListener("pointerup", endDrag);
-  ribbon.addEventListener("pointercancel", endDrag);
+  canvasEl.addEventListener("pointerup", endDrag);
+  canvasEl.addEventListener("pointercancel", endDrag);
 
-  ribbon.addEventListener("keydown", (event) => {
-    if (!ribbonInteractive(snapshot)) return;
+  canvasEl.addEventListener("keydown", (event) => {
+    if (!splitInteractive(snapshot)) return;
     const step = event.shiftKey ? 4 : 1;
     if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
       setSplit(proposedSplit - step);
@@ -247,13 +333,14 @@ export function mountApp(root: HTMLElement): () => void {
     } else if (event.key === "Home") {
       setSplit(1);
     } else if (event.key === "End") {
-      setSplit(ribbonLayerCount - 1);
+      setSplit(layerCount - 1);
     } else {
       return;
     }
     event.preventDefault();
   });
 
+  // ── Split controls ──────────────────────────────────────────────────────
   balanceButton.addEventListener("click", () => {
     const balanced = snapshot.placement?.balanced;
     if (!balanced) return;
@@ -262,12 +349,12 @@ export function mountApp(root: HTMLElement): () => void {
   });
 
   loadSlider.addEventListener("input", () => {
-    if (!ribbonInteractive(snapshot)) return;
-    setSplit(Math.round((Number(loadSlider.value) / 100) * ribbonLayerCount));
+    if (!splitInteractive(snapshot)) return;
+    setSplit(Math.round((Number(loadSlider.value) / 100) * layerCount));
   });
 
   loadEvenButton.addEventListener("click", () => {
-    setSplit(Math.round(ribbonLayerCount / 2));
+    setSplit(Math.round(layerCount / 2));
     toast("Workload split evenly");
   });
 
@@ -282,124 +369,19 @@ export function mountApp(root: HTMLElement): () => void {
     // A different model means a different layer count, so the proposed split
     // has to be re-derived from the new placement rather than carried over.
     proposedSplit = 0;
-    void room.selectModel(modelSelect.value);
+    void cluster.selectModel(modelSelect.value);
   });
 
-  localBudgetInput.addEventListener("change", () => {
-    const gb = Number(localBudgetInput.value);
+  (get("local-budget") as HTMLInputElement).addEventListener("change", (event) => {
+    const gb = Number((event.target as HTMLInputElement).value);
     if (!Number.isFinite(gb) || gb <= 0) return;
     localStorage.setItem(BUDGET_KEY, String(gb));
-    room.setBudgetBytes(gb * 1024 ** 3);
+    cluster.setBudgetBytes(gb * 1024 ** 3);
   });
 
   assignButton.addEventListener("click", () => {
-    void room.assignSplit(proposedSplit);
+    void cluster.assignSplit(proposedSplit);
   });
-
-  function paintRibbon(next: Readonly<RoomSnapshot>): void {
-    const layerCount = ribbonLayerCount;
-    if (layerCount === 0) return;
-
-    const assigned = next.localAssignment;
-    const hostLayers = assigned
-      ? next.role === "host"
-        ? assigned.end
-        : assigned.start
-      : proposedSplit;
-    const workerLayers = layerCount - hostLayers;
-
-    const hostIsLocal = next.role === "host";
-    const hostProgress = hostIsLocal ? next.localProgress : next.remoteProgress;
-    const workerProgress = hostIsLocal ? next.remoteProgress : next.localProgress;
-    const hostLoaded = assigned ? Math.round(hostProgress * hostLayers) : 0;
-    const workerLoaded = assigned ? Math.round(workerProgress * workerLayers) : 0;
-
-    const cells = ribbonCells.children;
-    for (let i = 0; i < cells.length; i++) {
-      const cell = cells[i] as HTMLElement;
-      const onHost = i < hostLayers;
-      const indexInSide = onHost ? i : i - hostLayers;
-      const loaded = onHost ? indexInSide < hostLoaded : indexInSide < workerLoaded;
-      cell.className = `layer ${onHost ? "host" : "worker"}${loaded ? " loaded" : ""}${
-        onHost && i === hostLayers - 1 ? " edge" : ""
-      }`;
-    }
-
-    const interactive = ribbonInteractive(next);
-    ribbon.classList.toggle("interactive", interactive);
-    ribbon.classList.toggle("locked", !interactive);
-    ribbon.classList.toggle("streaming", next.generating);
-    ribbon.tabIndex = interactive ? 0 : -1;
-    ribbon.setAttribute("aria-valuenow", String(hostLayers));
-    ribbon.setAttribute("aria-valuemin", "1");
-    ribbon.setAttribute("aria-valuemax", String(Math.max(1, layerCount - 1)));
-    ribbon.setAttribute(
-      "aria-valuetext",
-      `Host owns ${hostLayers} layers, worker owns ${workerLayers}`,
-    );
-    ribbon.style.setProperty("--split", String(hostLayers / layerCount));
-
-    text("host-range", hostLayers > 0 ? `0–${hostLayers - 1}` : "—");
-    text("worker-range", workerLayers > 0 ? `${hostLayers}–${layerCount - 1}` : "—");
-    // Exact numbers once assigned, otherwise the probed model's own byte layout.
-    const candidate = candidateAt(next.placement, hostLayers);
-    const hostBytes = assigned
-      ? next.role === "host"
-        ? next.localAssignment?.bytes
-        : next.remoteAssignment?.bytes
-      : candidate?.hostDownloadBytes;
-    const workerBytes = assigned
-      ? next.role === "host"
-        ? next.remoteAssignment?.bytes
-        : next.localAssignment?.bytes
-      : candidate?.workerDownloadBytes;
-    text("host-size", hostBytes === undefined ? "—" : formatBytes(hostBytes));
-    text("worker-size", workerBytes === undefined ? "—" : formatBytes(workerBytes));
-    text("host-side-role", hostIsLocal ? "Host · you" : "Host · peer");
-    text("worker-side-role", hostIsLocal ? "Worker · peer" : "Worker · you");
-
-    const assignLabel = assigned ? "Reassign & reload" : "Assign & load";
-    assignButton.textContent = assignLabel;
-    const fits = !candidate || (candidate.hostFits && candidate.workerFits);
-    assignButton.disabled = !interactive || !fits;
-    balanceButton.disabled = !interactive || !next.placement?.balanced;
-
-    text(
-      "split-hint",
-      assigned || !candidate || fits
-        ? ""
-        : !candidate.hostFits && !candidate.workerFits
-          ? "Both devices are over budget at this split."
-          : candidate.hostFits
-            ? `Worker needs ${formatBytes(candidate.workerBytes)} here — over its budget.`
-            : `Host needs ${formatBytes(candidate.hostBytes)} here — over its budget.`,
-    );
-
-    syncLoadControl(hostLayers, layerCount, interactive);
-  }
-
-  function syncLoadControl(
-    hostLayers: number,
-    layerCount: number,
-    interactive: boolean,
-  ): void {
-    const hostPercent = Math.round((hostLayers / layerCount) * 100);
-    loadSlider.style.setProperty("--load", String(hostLayers / layerCount));
-    // Don't yank the thumb while the user is dragging the slider itself; other
-    // controls (ribbon, presets, Balance) still push their value in here.
-    if (document.activeElement !== loadSlider) {
-      loadSlider.value = String(hostPercent);
-    }
-    loadSlider.disabled = !interactive;
-    loadSlider.setAttribute(
-      "aria-valuetext",
-      `Host handles ${hostPercent}%, worker handles ${100 - hostPercent}%`,
-    );
-    loadEvenButton.disabled = !interactive;
-    loadPowerButton.disabled = !interactive || !snapshot.placement?.recommended;
-    text("host-load-pct", `${hostPercent}%`);
-    text("worker-load-pct", `${100 - hostPercent}%`);
-  }
 
   // ── Composer ────────────────────────────────────────────────────────────
   function resizeComposer(): void {
@@ -419,25 +401,22 @@ export function mountApp(root: HTMLElement): () => void {
     if (!value.trim() || promptInput.disabled) return;
     promptInput.value = "";
     resizeComposer();
-    void room.submitPrompt(value);
+    void cluster.submitPrompt(value);
   });
-  stopButton.addEventListener("click", () => room.stop());
-  resetButton.addEventListener("click", () => void room.reset());
+  stopButton.addEventListener("click", () => cluster.stop());
+  resetButton.addEventListener("click", () => void cluster.reset());
 
-  // ── Collapsible settings cards ──────────────────────────────────────────
-  setupCollapsibleCards(root);
+  clearCacheButton.addEventListener("click", async () => {
+    clearCacheButton.disabled = true;
+    await cluster.clearWeightCache();
+    toast("Cached weights cleared");
+  });
 
-  // ── Mobile cluster sheet ────────────────────────────────────────────────
-  const setSheet = (open: boolean) => {
-    roomView.classList.toggle("sheet-open", open);
-    clusterToggle.setAttribute("aria-expanded", String(open));
-  };
-  clusterToggle.addEventListener("click", () =>
-    setSheet(!roomView.classList.contains("sheet-open")),
-  );
-  sheetBackdrop.addEventListener("click", () => setSheet(false));
   const onKeyDown = (event: KeyboardEvent) => {
-    if (event.key === "Escape") setSheet(false);
+    if (event.key === "Escape" && inspectorOpen) {
+      inspectorOpen = false;
+      applyInspector();
+    }
   };
   window.addEventListener("keydown", onKeyDown);
 
@@ -454,28 +433,35 @@ export function mountApp(root: HTMLElement): () => void {
   }
 
   // ── Render ──────────────────────────────────────────────────────────────
-  function render(next: Readonly<RoomSnapshot>): void {
+  function render(next: Readonly<ClusterSnapshot>): void {
     snapshot = next;
     const active = Boolean(next.role);
     joinView.hidden = active;
-    roomView.hidden = !active;
+    clusterView.hidden = !active;
     if (!active) return;
 
-    // Layer count is per-model, so the ribbon stays empty until the host has
-    // probed the GGUF header or the worker has been told its assignment.
-    const layerCount =
+    // Layer count is per-model, so the graph carries no filaments until the
+    // host has probed the GGUF header or the worker has been told its range.
+    layerCount =
       next.modelProfile?.layerCount ??
       next.localAssignment?.layerCount ??
       next.remoteAssignment?.layerCount ??
       0;
-    ensureRibbon(layerCount);
     if (proposedSplit === 0 && layerCount > 0) {
       proposedSplit = next.placement?.recommended?.split ?? Math.round(layerCount / 2);
     }
 
-    text("room-code-display", next.roomCode ?? "—");
+    // Choosing the split is the one thing that must happen right after
+    // pairing, so the inspector offers it once instead of waiting to be found.
+    if (!modelGroupOffered && next.role === "host" && next.catalogue.length > 0) {
+      modelGroupOffered = true;
+      group = "model";
+    }
+
+    text("cluster-code-display", next.clusterCode ?? "—");
+    text("session-code", next.clusterCode ?? "—");
     text("role-display", next.role === "host" ? "Host" : "Worker");
-    text("room-status", next.status);
+    text("cluster-status", next.status);
     text("engine-mode", next.engineAvailable ? "engine live" : "transport only");
     get("engine-mode").className = `chip ${next.engineAvailable ? "ok" : "warn"}`;
     get("status-dot").className = `dot ${phaseTone(next.localPhase)}`;
@@ -483,22 +469,29 @@ export function mountApp(root: HTMLElement): () => void {
     banner.hidden = !next.error;
     text("error-banner", next.error ?? "");
 
-    renderStepper(next);
-    renderInvite(next);
+    renderPairing(next);
     renderModel(next);
     // The user's own budget outlives the session; apply it as soon as the first
     // capability probe gives us something to override.
     if (!budgetRestored && next.localCapabilities) {
       budgetRestored = true;
       const stored = Number(localStorage.getItem(BUDGET_KEY));
-      if (Number.isFinite(stored) && stored > 0) room.setBudgetBytes(stored * 1024 ** 3);
+      if (Number.isFinite(stored) && stored > 0) cluster.setBudgetBytes(stored * 1024 ** 3);
     }
 
-    renderPeer("local", next.localCapabilities, next.localPhase, next.localProgress, true);
-    renderPeer("remote", next.remoteCapabilities, next.remotePhase, next.remoteProgress, false);
-    paintRibbon(next);
+    // Which half of the model a device owns decides its colour everywhere.
+    const localSide = next.role === "host" ? "host" : "worker";
+    const remoteSide = next.role === "host" ? "worker" : "host";
+    renderPeer("local", next.localCapabilities, next.localPhase, next.localProgress, true, localSide);
+    renderPeer("remote", next.remoteCapabilities, next.remotePhase, next.remoteProgress, false, remoteSide);
+
+    paintCanvas(next);
+    paintSplit(next);
+    renderCache(next);
     renderTelemetry(next);
     renderTranscript(next);
+    renderCaption(next);
+    applyInspector();
 
     promptInput.disabled = !next.ready || next.generating;
     promptInput.placeholder = next.ready
@@ -521,32 +514,125 @@ export function mountApp(root: HTMLElement): () => void {
     );
   }
 
-  function renderStepper(next: Readonly<RoomSnapshot>): void {
-    const done = [
-      true,
-      next.connected,
-      Boolean(next.localAssignment),
-      next.ready,
-    ];
-    const current = done.findIndex((value) => !value);
-    const steps = get("stepper").children;
-    for (let i = 0; i < steps.length; i++) {
-      const step = steps[i] as HTMLElement;
-      step.className = `step ${
-        done[i] ? "done" : i === current ? "active" : "todo"
-      }`;
-    }
+  /** Host-owned layer count for the current snapshot, assigned or proposed. */
+  function hostLayersOf(next: Readonly<ClusterSnapshot>): number {
+    const assigned = next.localAssignment;
+    if (!assigned) return Math.min(proposedSplit, Math.max(layerCount, 1));
+    return next.role === "host" ? assigned.end : assigned.start;
   }
 
-  function renderInvite(next: Readonly<RoomSnapshot>): void {
+  /** Download size of each side at the current split, assigned or estimated. */
+  function sideBytes(
+    next: Readonly<ClusterSnapshot>,
+    hostLayers: number,
+  ): { host?: number; worker?: number } {
+    const hostIsLocal = next.role === "host";
+    const candidate = candidateAt(next.placement, hostLayers);
+    if (!next.localAssignment) {
+      return { host: candidate?.hostDownloadBytes, worker: candidate?.workerDownloadBytes };
+    }
+    const local = next.localAssignment.bytes;
+    const remote = next.remoteAssignment?.bytes;
+    return hostIsLocal ? { host: local, worker: remote } : { host: remote, worker: local };
+  }
+
+  function paintCanvas(next: Readonly<ClusterSnapshot>): void {
+    const hostLayers = hostLayersOf(next);
+    const workerLayers = Math.max(0, layerCount - hostLayers);
+    const hostIsLocal = next.role === "host";
+    const assigned = Boolean(next.localAssignment);
+    const hostProgress = hostIsLocal ? next.localProgress : next.remoteProgress;
+    const workerProgress = hostIsLocal ? next.remoteProgress : next.localProgress;
+    const hostCaps = hostIsLocal ? next.localCapabilities : next.remoteCapabilities;
+    const workerCaps = hostIsLocal ? next.remoteCapabilities : next.localCapabilities;
+    const bytes = sideBytes(next, hostLayers);
+
+    canvas.paint({
+      layerCount,
+      hostLayers,
+      hostLoaded: assigned ? Math.round(hostProgress * hostLayers) : 0,
+      workerLoaded: assigned ? Math.round(workerProgress * workerLayers) : 0,
+      hostName: hostCaps?.label ?? "Host",
+      workerName: next.connected ? (workerCaps?.label ?? "Worker") : "No second device",
+      hostDetail: nodeDetail(hostLayers, layerCount, bytes.host),
+      workerDetail: next.connected
+        ? nodeDetail(workerLayers, layerCount, bytes.worker)
+        : "waiting to pair",
+      hostIsLocal,
+      hostPhase: hostIsLocal ? next.localPhase : next.remotePhase,
+      workerPhase: hostIsLocal ? next.remotePhase : next.localPhase,
+      connected: next.connected,
+      generating: next.generating,
+      interactive: splitInteractive(next),
+      selected,
+    });
+  }
+
+  /** The split panel's readouts, which mirror the canvas rather than lead it. */
+  function paintSplit(next: Readonly<ClusterSnapshot>): void {
+    const hostLayers = hostLayersOf(next);
+    const workerLayers = Math.max(0, layerCount - hostLayers);
+    const hostIsLocal = next.role === "host";
+    const assigned = Boolean(next.localAssignment);
+    const interactive = splitInteractive(next);
+    const bytes = sideBytes(next, hostLayers);
+
+    text("host-range", hostLayers > 0 ? `0–${hostLayers - 1}` : "—");
+    text("worker-range", workerLayers > 0 ? `${hostLayers}–${layerCount - 1}` : "—");
+    text("host-size", bytes.host === undefined ? "—" : formatBytes(bytes.host));
+    text("worker-size", bytes.worker === undefined ? "—" : formatBytes(bytes.worker));
+    text("host-side-role", hostIsLocal ? "Host · you" : "Host · peer");
+    text("worker-side-role", hostIsLocal ? "Worker · peer" : "Worker · you");
+
+    const candidate = candidateAt(next.placement, hostLayers);
+    assignButton.textContent = assigned ? "Reassign & reload" : "Assign & load";
+    const fits = !candidate || (candidate.hostFits && candidate.workerFits);
+    assignButton.disabled = !interactive || !fits;
+    balanceButton.disabled = !interactive || !next.placement?.balanced;
+
+    text(
+      "split-hint",
+      assigned || !candidate || fits
+        ? ""
+        : !candidate.hostFits && !candidate.workerFits
+          ? "Both devices are over budget at this split."
+          : candidate.hostFits
+            ? `Worker needs ${formatBytes(candidate.workerBytes)} here — over its budget.`
+            : `Host needs ${formatBytes(candidate.hostBytes)} here — over its budget.`,
+    );
+
+    const hostPercent = layerCount > 0 ? Math.round((hostLayers / layerCount) * 100) : 50;
+    loadSlider.style.setProperty("--load", String(hostPercent / 100));
+    // Don't yank the thumb while the user is dragging the slider itself; the
+    // canvas divider and the presets still push their value in here.
+    if (document.activeElement !== loadSlider) {
+      loadSlider.value = String(hostPercent);
+    }
+    loadSlider.disabled = !interactive;
+    loadSlider.setAttribute(
+      "aria-valuetext",
+      `Host handles ${hostPercent}%, worker handles ${100 - hostPercent}%`,
+    );
+    loadEvenButton.disabled = !interactive;
+    loadPowerButton.disabled = !interactive || !next.placement?.recommended;
+    text("host-load-pct", `${hostPercent}%`);
+    text("worker-load-pct", `${100 - hostPercent}%`);
+  }
+
+  /**
+   * Pairing takes over the canvas rather than hiding in a side panel: the
+   * second node does not exist yet, and scanning the code is the only thing
+   * left to do.
+   */
+  function renderPairing(next: Readonly<ClusterSnapshot>): void {
     const show = next.role === "host" && !next.connected;
     invitePanel.hidden = !show;
-    transcriptEl.hidden = show;
-    promptForm.hidden = show;
+    clusterView.classList.toggle("pairing", show);
     if (!show) return;
     const url = inviteUrl();
     inviteLink.textContent = url.replace(/^https?:\/\//, "");
     shareButton.hidden = typeof navigator.share !== "function";
+    text("invite-code", next.clusterCode ?? "—");
     if (lastInviteCode === url) return;
     lastInviteCode = url;
     try {
@@ -556,11 +642,9 @@ export function mountApp(root: HTMLElement): () => void {
     }
   }
 
-  function renderModel(next: Readonly<RoomSnapshot>): void {
-    const card = get("model-card");
+  function renderModel(next: Readonly<ClusterSnapshot>): void {
     // Only the host chooses; the worker is told what to load.
-    card.hidden = next.role !== "host" || next.catalogue.length === 0;
-    if (card.hidden) return;
+    if (next.role !== "host" || next.catalogue.length === 0) return;
 
     if (modelSelect.options.length !== next.catalogue.length) {
       modelSelect.replaceChildren(
@@ -574,7 +658,8 @@ export function mountApp(root: HTMLElement): () => void {
     }
     if (modelSelect.value !== next.modelId) modelSelect.value = next.modelId;
     // Switching models mid-load would strand a half-loaded shard on the peer.
-    modelSelect.disabled = next.modelPhase === "probing" || next.localPhase === "loading" || next.generating;
+    modelSelect.disabled =
+      next.modelPhase === "probing" || next.localPhase === "loading" || next.generating;
 
     const verdict =
       next.modelPhase === "probing"
@@ -600,13 +685,20 @@ export function mountApp(root: HTMLElement): () => void {
     phase: string,
     progress: number,
     isLocal: boolean,
+    side: "host" | "worker",
   ): void {
+    // The tone class only drives the halo's motion; the side owns the colour,
+    // so an idle device is still visibly the host or the worker.
+    const tone = phaseTone(phase);
+    get(`${prefix}-orb`).className = capabilities
+      ? `orb ${side}${tone === "idle" ? "" : ` ${tone}`}`
+      : "orb idle";
     text(
       `${prefix}-name`,
       capabilities?.label ?? (isLocal ? "This device" : "Waiting for peer…"),
     );
     text(`${prefix}-phase`, phase);
-    get(`${prefix}-phase`).className = `phase ${phaseTone(phase)}`;
+    get(`${prefix}-phase`).className = `phase ${tone}`;
     text(
       `${prefix}-gpu`,
       capabilities
@@ -629,7 +721,7 @@ export function mountApp(root: HTMLElement): () => void {
       budgetInput.value = (capabilities.budgetBytes / 1024 ** 3).toFixed(2);
     }
     // Short enough to sit on the budget's own line; the full wording is the
-    // tooltip, so the rail does not grow a second row per device.
+    // tooltip, so the panel does not grow a second row per device.
     const budgetSource = capabilities?.budgetSource;
     const budgetNote =
       budgetSource === "user"
@@ -646,106 +738,207 @@ export function mountApp(root: HTMLElement): () => void {
     text(`${prefix}-percent`, phase === "loading" ? `${percent}%` : "");
   }
 
-  function renderTelemetry(next: Readonly<RoomSnapshot>): void {
-    const pending = [...next.transcript].reverse().find((entry) => entry.pending);
+  function renderTelemetry(next: Readonly<ClusterSnapshot>): void {
+    const perf = next.perf;
+    const tokens = perf.promptTokens + perf.decodeTokens;
+    // The strip appears the moment the first activation moves and stays up
+    // afterwards: the numbers from a finished run are the point.
+    get("hud").hidden = tokens === 0 || !invitePanel.hidden;
+    if (tokens === 0) return;
 
-    if (next.generating && !wasGenerating) {
-      generationStart = performance.now();
-      tokenCount = 0;
-      tokenTimes = [];
-      lastPendingText = "";
-    }
-    if (next.generating && pending && pending.text !== lastPendingText) {
-      lastPendingText = pending.text;
-      tokenCount++;
-      tokenTimes.push(performance.now());
-      if (tokenTimes.length > 24) tokenTimes.shift();
-    }
-    wasGenerating = next.generating;
+    const live = get("metric-live");
+    live.textContent = perf.running ? "live" : "last run";
+    live.className = `chip ${perf.running ? "live" : "ok"}`;
 
-    let rate = 0;
-    if (tokenTimes.length >= 2) {
-      const span = tokenTimes[tokenTimes.length - 1] - tokenTimes[0];
-      if (span > 0) rate = ((tokenTimes.length - 1) / span) * 1000;
-    }
+    text("metric-rate", perf.tokensPerSecond > 0 ? perf.tokensPerSecond.toFixed(1) : "—");
+    text("metric-ttft", perf.ttftMicros ? formatMicros(perf.ttftMicros) : "—");
+    text("metric-tokens", String(tokens));
+    text("metric-per-token", formatMicros(Math.round(perf.totalMicros / tokens)));
 
-    const hasRun = tokenCount > 0;
-    get("telemetry").hidden = !hasRun;
-    text("metric-tokens", String(tokenCount));
-    text("metric-rate", rate > 0 ? rate.toFixed(1) : "—");
+    // Stage bar and legend share one pass so a stage's width and its printed
+    // share can never disagree.
+    const bar = get("stage-bar");
+    const parts: string[] = [];
+    for (const stage of STAGE_NAMES) {
+      const stat = perf.stages[stage];
+      const segment = bar.querySelector<HTMLElement>(`i[data-stage="${stage}"]`);
+      if (segment) segment.style.flexGrow = String(Math.max(stat.share, 0));
+      text(`stage-${stage}-time`, formatMicros(stat.meanMicros));
+      text(`stage-${stage}-share`, `${Math.round(stat.share * 100)}%`);
+      parts.push(`${stage} ${Math.round(stat.share * 100)}%`);
+    }
+    bar.setAttribute("aria-label", `Stage breakdown: ${parts.join(", ")}`);
+    // A run whose time is mostly network is the interesting failure mode, so
+    // name it rather than leaving the reader to compare four percentages.
+    get("stage-legend").className = `stage-legend dominant-${perf.dominantStage ?? "none"}`;
+
+    renderSpark(perf.recentMicros);
+
     text(
-      "metric-elapsed",
-      hasRun ? `${((performance.now() - generationStart) / 1000).toFixed(1)}s` : "—",
+      "metric-bytes",
+      perf.bytesPerToken > 0 ? `${formatCount(perf.bytesPerToken)}/token` : "—",
+    );
+    text(
+      "metric-bytes-total",
+      `${formatCount(perf.bytesOut)} · ${formatCount(perf.bytesIn)}`,
+    );
+
+    text("hud-rate", perf.tokensPerSecond > 0 ? perf.tokensPerSecond.toFixed(1) : "—");
+    text("hud-ttft", perf.ttftMicros ? formatMicros(perf.ttftMicros) : "—");
+    text("hud-tokens", String(tokens));
+    text(
+      "hud-wire",
+      perf.bytesPerToken > 0 ? `${formatCount(perf.bytesPerToken)}/tok` : "—",
     );
   }
 
-  function renderTranscript(next: Readonly<RoomSnapshot>): void {
+  /**
+   * Latency per token, oldest left. Scaled to the window's own peak: the shape
+   * of the variation matters more here than an absolute axis, and the peak is
+   * printed beside it.
+   */
+  function renderSpark(values: readonly number[]): void {
+    const line = get("spark-line");
+    const area = get("spark-area");
+    if (values.length < 2) {
+      line.setAttribute("d", "");
+      area.setAttribute("d", "");
+      text("metric-spark-peak", values.length === 1 ? formatMicros(values[0]!) : "—");
+      return;
+    }
+
+    const peak = Math.max(...values);
+    const scale = peak > 0 ? peak : 1;
+    const stepX = 100 / (values.length - 1);
+    const points = values.map((value, i) => {
+      const x = i * stepX;
+      // 1px of padding top and bottom so the peak is not clipped by the stroke.
+      const y = 27 - (value / scale) * 26;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    });
+
+    line.setAttribute("d", `M${points.join("L")}`);
+    area.setAttribute("d", `M0,28L${points.join("L")}L100,28Z`);
+    text("metric-spark-peak", `peak ${formatMicros(peak)}`);
+  }
+
+  function renderCache(next: Readonly<ClusterSnapshot>): void {
+    const report = next.cache;
+    if (!report) return;
+
+    const state = get("cache-state");
+    const assigned = next.localAssignment?.bytes ?? 0;
+    const held = report.shard.bytes;
+    // Against the assigned shard when there is one, so the bar answers "will
+    // this session re-download?" rather than "how full is the disk?".
+    const fraction = assigned > 0 ? clamp(held / assigned, 0, 1) : 0;
+
+    if (!report.available) {
+      state.textContent = "unavailable";
+      state.className = "chip warn";
+      text(
+        "cache-summary",
+        "This browser will not store weights — every session re-downloads its shard. " +
+          "Private browsing and insecure origins both block the cache.",
+      );
+    } else if (held === 0) {
+      state.textContent = "empty";
+      state.className = "chip idle";
+      text(
+        "cache-summary",
+        "Nothing stored yet. The first load fills the cache, and later sessions " +
+          "restore from it instead of downloading again.",
+      );
+    } else {
+      const complete = assigned > 0 && held >= assigned;
+      state.textContent = complete ? "complete" : "partial";
+      state.className = `chip ${complete ? "ok" : "live"}`;
+      text(
+        "cache-summary",
+        `${formatBytes(held)} stored for this model` +
+          (assigned > 0 ? ` of the ${formatBytes(assigned)} this device owns` : "") +
+          `. ${formatBytes(report.total.bytes)} across all models` +
+          (report.persisted ? ", kept through storage pressure." : "."),
+      );
+    }
+
+    get("cache-fill").style.width = `${Math.round(fraction * 100)}%`;
+    clearCacheButton.disabled = !report.available || report.total.bytes === 0;
+  }
+
+  function renderTranscript(next: Readonly<ClusterSnapshot>): void {
+    // With no conversation the graph is the content; the reading layer only
+    // exists once there is something to read.
+    const empty = next.transcript.length === 0;
+    chatLayer.hidden = empty || !invitePanel.hidden;
+    clusterView.classList.toggle("reading", !chatLayer.hidden);
+    if (empty) {
+      transcriptEl.replaceChildren();
+      return;
+    }
+
     const nearBottom =
       transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight <
       120;
 
-    if (next.transcript.length === 0) {
-      transcriptEl.replaceChildren(emptyState(next));
-    } else {
-      transcriptEl.replaceChildren(
-        ...next.transcript.map((entry) => {
-          const article = document.createElement("article");
-          article.className = `msg ${entry.role}`;
+    transcriptEl.replaceChildren(
+      ...next.transcript.map((entry) => {
+        const article = document.createElement("article");
+        article.className = `msg ${entry.role}`;
 
-          const meta = document.createElement("div");
-          meta.className = "msg-meta";
-          const who = document.createElement("span");
-          who.textContent =
-            entry.role === "assistant"
-              ? "Split model"
-              : entry.role === "user"
-                ? "You"
-                : "System";
-          meta.append(who);
+        const meta = document.createElement("div");
+        meta.className = "msg-meta";
+        const who = document.createElement("span");
+        who.textContent =
+          entry.role === "assistant"
+            ? "Split model"
+            : entry.role === "user"
+              ? "You"
+              : "System";
+        meta.append(who);
 
-          const bubble = document.createElement("div");
-          bubble.className = "bubble";
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
 
-          if (entry.pending && !entry.text) {
-            const dots = document.createElement("span");
-            dots.className = "dots";
-            dots.setAttribute("aria-label", "Generating");
-            dots.append(
-              document.createElement("i"),
-              document.createElement("i"),
-              document.createElement("i"),
-            );
-            bubble.append(dots);
-          } else {
-            bubble.textContent = entry.text;
-            if (entry.pending) {
-              const caret = document.createElement("span");
-              caret.className = "caret";
-              bubble.append(caret);
+        if (entry.pending && !entry.text) {
+          const dots = document.createElement("span");
+          dots.className = "dots";
+          dots.setAttribute("aria-label", "Generating");
+          dots.append(
+            document.createElement("i"),
+            document.createElement("i"),
+            document.createElement("i"),
+          );
+          bubble.append(dots);
+        } else {
+          bubble.textContent = entry.text;
+          if (entry.pending) {
+            const caret = document.createElement("span");
+            caret.className = "caret";
+            bubble.append(caret);
+          }
+        }
+
+        if (!entry.pending && entry.text) {
+          const copy = document.createElement("button");
+          copy.type = "button";
+          copy.className = "msg-copy";
+          copy.textContent = "Copy";
+          copy.addEventListener("click", async () => {
+            try {
+              await navigator.clipboard.writeText(entry.text);
+              toast("Message copied");
+            } catch {
+              /* clipboard unavailable */
             }
-          }
+          });
+          meta.append(copy);
+        }
 
-          if (!entry.pending && entry.text) {
-            const copy = document.createElement("button");
-            copy.type = "button";
-            copy.className = "msg-copy";
-            copy.textContent = "Copy";
-            copy.addEventListener("click", async () => {
-              try {
-                await navigator.clipboard.writeText(entry.text);
-                toast("Message copied");
-              } catch {
-                /* clipboard unavailable */
-              }
-            });
-            meta.append(copy);
-          }
-
-          article.append(meta, bubble);
-          return article;
-        }),
-      );
-    }
+        article.append(meta, bubble);
+        return article;
+      }),
+    );
 
     if (nearBottom) {
       requestAnimationFrame(() => {
@@ -754,39 +947,34 @@ export function mountApp(root: HTMLElement): () => void {
     }
   }
 
-  function emptyState(next: Readonly<RoomSnapshot>): HTMLElement {
-    const wrap = document.createElement("div");
-    wrap.className = "empty";
-    const visual = document.createElement("div");
-    visual.className = "empty-visual";
-    visual.innerHTML = `<span></span><span></span><span></span>`;
-    const title = document.createElement("h3");
-    const body = document.createElement("p");
+  /**
+   * One caption under the graph, naming the next action. It replaces the old
+   * empty-state card and disappears as soon as there is a conversation.
+   */
+  function renderCaption(next: Readonly<ClusterSnapshot>): void {
+    stageCaption.hidden = next.transcript.length > 0 || !invitePanel.hidden;
+    if (stageCaption.hidden) return;
 
+    let title: string;
+    let body: string;
     if (!next.connected) {
-      title.textContent = "Waiting for the second device";
-      body.textContent =
-        next.role === "host"
-          ? "Scan the invite code with your phone to pair it as the worker."
-          : "Connecting to the host room…";
+      title = "Waiting for the second device";
+      body = "Connecting to the host cluster…";
     } else if (!next.localAssignment) {
-      title.textContent = "Choose how to divide the model";
-      body.textContent =
+      title = "Divide the model";
+      body =
         next.role === "host"
-          ? "Drag the ribbon to set the split point, then assign and load."
+          ? "Drag the marker between the devices to move layers, then assign and load."
           : "The host is choosing which layers this device will own.";
     } else if (!next.ready) {
-      title.textContent = "Loading model shards";
-      body.textContent =
-        "Each device downloads only the tensors for the layers it owns.";
+      title = "Loading shards";
+      body = "Each device downloads only the tensors for the layers it owns.";
     } else {
-      title.textContent = "All devices ready";
-      body.textContent =
-        "Every token crosses the network. Send a message to watch it happen.";
+      title = "Both devices ready";
+      body = "Every token crosses the network. Send a message to watch it happen.";
     }
-
-    wrap.append(visual, title, body);
-    return wrap;
+    text("caption-title", title);
+    text("caption-body", body);
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────
@@ -805,69 +993,38 @@ export function mountApp(root: HTMLElement): () => void {
     get(id).textContent = value;
   }
 
+  applyInspector();
   render(snapshot);
   resizeComposer();
 
   return () => {
     window.removeEventListener("keydown", onKeyDown);
-    void room.leave();
+    void cluster.leave();
   };
+}
+
+/** The line under a canvas node: how much of the model it carries. */
+function nodeDetail(layers: number, layerCount: number, bytes: number | undefined): string {
+  if (layerCount === 0) return "no model selected";
+  return `${layers} layers${bytes === undefined ? "" : ` · ${formatBytes(bytes)}`}`;
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-/** Every card the rail folds into its single scrollable settings panel. */
-function setupCollapsibleCards(root: HTMLElement): void {
-  let collapsed: Set<string>;
-  try {
-    collapsed = new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]"));
-  } catch {
-    collapsed = new Set();
-  }
-
-  root.querySelectorAll<HTMLElement>(".card[id] > .card-head > .card-toggle").forEach(
-    (toggle) => {
-      const card = toggle.closest<HTMLElement>(".card[id]");
-      if (!card) return;
-      const id = card.id;
-
-      const apply = (isCollapsed: boolean) => {
-        card.classList.toggle("collapsed", isCollapsed);
-        toggle.setAttribute("aria-expanded", String(!isCollapsed));
-        toggle.setAttribute("aria-label", isCollapsed ? "Expand section" : "Collapse section");
-      };
-      apply(collapsed.has(id));
-
-      toggle.addEventListener("click", () => {
-        const next = !card.classList.contains("collapsed");
-        apply(next);
-        if (next) collapsed.add(id);
-        else collapsed.delete(id);
-        localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]));
-      });
-    },
-  );
-}
-
-function cardToggle(): string {
-  return `<button class="card-toggle" type="button" aria-expanded="true" aria-label="Collapse section">
-    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-      <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-  </button>`;
-}
-
 /** The candidate describing a given split, or undefined before the model is probed. */
-function candidateAt(placement: PlacementResult | undefined, split: number): SplitCandidate | undefined {
+function candidateAt(
+  placement: PlacementResult | undefined,
+  split: number,
+): SplitCandidate | undefined {
   return placement?.candidates[split - 1];
 }
 
 /**
- * Short enough to sit beside the card title at any rail width. The full
- * reasoning is the summary sentence directly below it, so the chip only has to
- * carry the verdict itself.
+ * Short enough to sit beside the panel title at any width. The full reasoning
+ * is the summary sentence directly below it, so the chip only has to carry the
+ * verdict itself.
  */
 function verdictLabel(placement: PlacementResult | undefined): { text: string; tone: string } {
   switch (placement?.verdict) {
@@ -899,6 +1056,88 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Outline glyphs for the stat tiles. Single-path where possible so they stay
+ * legible at 15px, and stroked in `currentColor` so the tile owns the colour.
+ */
+const ICONS = {
+  clock: `<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>`,
+  stack: `<path d="M12 4l8 4-8 4-8-4 8-4Z"/><path d="M4 12l8 4 8-4"/><path d="M4 16l8 4 8-4"/>`,
+  gauge: `<path d="M4 17a8 8 0 1 1 16 0"/><path d="M12 17l4-5"/>`,
+  swap: `<path d="M4 9h13l-3.5-3.5M20 15H7l3.5 3.5"/>`,
+} as const;
+
+function icon(path: string, size = 15): string {
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none"
+    stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+    stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+}
+
+function metricTile(
+  id: string,
+  label: string,
+  glyph: string,
+  initial: string,
+  tight = false,
+): string {
+  return `
+    <div class="tile${tight ? " tight" : ""}">
+      ${icon(glyph)}
+      <b id="${id}" class="mono">${initial}</b>
+      <span>${label}</span>
+    </div>`;
+}
+
+function hudStat(id: string, label: string, unit: string): string {
+  return `
+    <div class="hud-stat">
+      <span class="hud-label">${label}</span>
+      <span class="hud-value">
+        <b id="${id}" class="mono">—</b>${unit ? `<i>${unit}</i>` : ""}
+      </span>
+    </div>`;
+}
+
+function stageLegendRow(stage: string, label: string): string {
+  return `
+    <li data-stage="${stage}">
+      <i class="swatch"></i>
+      <span class="stage-name">${label}</span>
+      <b id="stage-${stage}-time" class="mono">—</b>
+      <span id="stage-${stage}-share" class="stage-share mono">—</span>
+    </li>`;
+}
+
+function peerRow(prefix: string, fallback: string): string {
+  return `
+    <article class="peer">
+      <div class="peer-top">
+        <span id="${prefix}-orb" class="orb idle" aria-hidden="true"></span>
+        <h4 id="${prefix}-name">${fallback}</h4>
+        <span id="${prefix}-phase" class="phase">connecting</span>
+      </div>
+      <p id="${prefix}-gpu" class="peer-gpu">Probing capabilities…</p>
+      <div class="peer-foot">
+        <span id="${prefix}-memory" class="mono">—</span>
+        <span id="${prefix}-percent" class="mono pct"></span>
+      </div>
+      <div class="peer-budget">
+        <label for="${prefix}-budget">Budget</label>
+        <input id="${prefix}-budget" class="budget-input mono" type="number"
+               min="0.25" step="0.25" inputmode="decimal" aria-describedby="${prefix}-budget-src">
+        <span class="budget-unit">GB</span>
+        <span id="${prefix}-budget-src" class="budget-src"></span>
+      </div>
+      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+        <i id="${prefix}-progress"></i>
+      </div>
+    </article>`;
+}
+
+function panelHead(title: string, extra = ""): string {
+  return `<div class="panel-head"><h3>${title}</h3>${extra}</div>`;
+}
+
 function shell(): string {
   return `
   <div class="backdrop" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -908,9 +1147,9 @@ function shell(): string {
     <div class="join-inner">
       <div class="join-brand">
         <div class="logo" aria-hidden="true"><i></i><i></i><i></i></div>
-        <p class="join-appname">Multi<b>Device AI</b></p>
+        <p class="join-appname">Local<b>Cluster AI</b></p>
       </div>
-      <h1>One Model<br><em>Run locally on multiple devices</em></h1>
+      <h1>One Model<br><em>Run AI locally on multiple devices</em></h1>
       <p class="lede">
         Split a language model across your laptop, phone, or tablet.
         Each device processes its own layers with no cloud and no subscriptions.
@@ -922,17 +1161,17 @@ function shell(): string {
             <span>Device name</span>
             <input id="device-name" maxlength="32" autocomplete="nickname" placeholder="Laptop">
           </label>
-          <label class="field" for="room-code">
-            <span>Room code</span>
-            <input id="room-code" class="mono code" maxlength="8" placeholder="ABC123" autocomplete="off" spellcheck="false">
+          <label class="field" for="cluster-code">
+            <span>Cluster code</span>
+            <input id="cluster-code" class="mono code" maxlength="8" placeholder="ABC123" autocomplete="off" spellcheck="false">
           </label>
         </div>
         <div class="join-actions">
-          <button id="create-room" class="btn primary">Create room</button>
-          <button id="join-room" class="btn">Join room</button>
+          <button id="create-cluster" class="btn primary">Create cluster</button>
+          <button id="join-cluster" class="btn">Join cluster</button>
         </div>
         <p id="join-status" class="hint" aria-live="polite">
-          Start a room on any device, then share the invite link with a second device.
+          Start a cluster on any device, then share the invite link with a second device.
         </p>
       </div>
 
@@ -945,94 +1184,129 @@ function shell(): string {
     </div>
   </section>
 
-  <section id="room-view" class="room" hidden>
+  <section id="cluster-view" class="cluster" hidden>
     <header class="topbar">
-      <a class="wordmark" href="./" aria-label="MultiDevice AI home">
+      <a class="wordmark" href="./" aria-label="LocalCluster AI home">
         <span class="logo sm" aria-hidden="true"><i></i><i></i><i></i></span>
-        multi<b>device</b>
+        local<b>cluster</b>
       </a>
-      <div class="topbar-spacer"></div>
-      <div class="room-pill"><span>Room</span><strong id="room-code-display" class="mono">—</strong></div>
-      <span id="engine-mode" class="chip"></span>
-      <button id="copy-link" class="btn ghost sm">Copy invite</button>
-      <button id="theme-toggle" class="btn icon" aria-label="Toggle appearance">☾</button>
-      <button id="cluster-toggle" class="btn icon cluster" aria-expanded="false" aria-label="Show cluster details">
+      <div class="topbar-status">
         <span id="status-dot" class="dot"></span>
+        <p id="cluster-status" class="topbar-line" aria-live="polite"></p>
+      </div>
+      <div class="cluster-pill"><span>Cluster</span><strong id="cluster-code-display" class="mono">—</strong></div>
+      <b id="role-display" class="role">—</b>
+      <span id="engine-mode" class="chip"></span>
+      <button id="theme-toggle" class="btn icon" aria-label="Toggle appearance">☾</button>
+      <button id="inspector-toggle" class="btn icon" aria-expanded="true" aria-label="Toggle the detail panel">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+             stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+          <rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M14.5 4.5v15"/>
+        </svg>
       </button>
     </header>
 
     <div id="error-banner" class="error" role="alert" hidden></div>
 
     <div class="workspace">
-      <div id="sheet-backdrop" class="sheet-backdrop"></div>
+      <!-- The graph is the application surface; everything else floats on it. -->
+      <div class="stage">
+        <svg id="canvas" class="canvas" role="img" tabindex="-1"></svg>
 
-      <aside class="rail">
-        <ol id="stepper" class="stepper">
-          <li class="step"><i></i><span>Room</span></li>
-          <li class="step"><i></i><span>Pair</span></li>
-          <li class="step"><i></i><span>Split</span></li>
-          <li class="step"><i></i><span>Ready</span></li>
-        </ol>
+        <div id="stage-caption" class="stage-caption" aria-live="polite">
+          <h2 id="caption-title"></h2>
+          <p id="caption-body"></p>
+        </div>
 
-        <section id="status-card" class="card status-card">
-          <div class="card-head">
-            <h2>Session</h2>
-            <b id="role-display" class="role">—</b>
-            ${cardToggle()}
-          </div>
-          <div class="card-body">
-            <p id="room-status" class="status-text" aria-live="polite"></p>
+        <section id="invite-panel" class="pairing-card card" hidden>
+          <p class="eyebrow">Pair a second device</p>
+          <h2 class="pairing-title">Scan to join as the worker</h2>
+          <div id="qr-holder" class="qr"></div>
+          <p class="pairing-code mono" id="invite-code">—</p>
+          <p class="pairing-url mono" id="invite-link"></p>
+          <div class="pairing-actions">
+            <button id="copy-link" class="btn sm">Copy invite link</button>
+            <button id="share-link" class="btn sm" hidden>Share</button>
           </div>
         </section>
 
-        <section id="peers-card" class="card peers">
-          <div class="card-head">
-            <h2>Devices</h2>
-            ${cardToggle()}
+        <div id="chat-layer" class="chat-layer" hidden>
+          <div id="transcript" class="transcript" aria-live="polite"></div>
+        </div>
+
+        <!-- One floating cluster: live figures, the prompt, and the four
+             groups of detail the inspector can show. -->
+        <div class="dock">
+          <div id="hud" class="hud" role="group" aria-label="Live generation metrics" hidden>
+            ${hudStat("hud-rate", "Throughput", "tok/s")}
+            ${hudStat("hud-ttft", "First token", "")}
+            ${hudStat("hud-tokens", "Tokens", "")}
+            ${hudStat("hud-wire", "On the wire", "")}
           </div>
-          <div class="card-body">
+
+          <form id="prompt-form" class="composer">
+            <div class="composer-box">
+              <textarea id="prompt-input" rows="1" placeholder="Waiting for both shards…"
+                        disabled spellcheck="true"></textarea>
+              <button id="send-button" type="submit" class="round send" aria-label="Send prompt">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                  <path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor"
+                        stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <button id="stop-generation" type="button" class="round stop" hidden aria-label="Stop generation">
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                  <rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/>
+                </svg>
+              </button>
+            </div>
+          </form>
+
+          <div class="dock-rail">
+            <button class="dock-chip" type="button" data-inspect="devices" aria-pressed="false">Devices</button>
+            <button class="dock-chip" type="button" data-inspect="model" aria-pressed="false">Model &amp; split</button>
+            <button class="dock-chip" type="button" data-inspect="perf" aria-pressed="false">Performance</button>
+            <button class="dock-chip" type="button" data-inspect="session" aria-pressed="false">Session</button>
+          </div>
+          <small id="composer-hint" class="hint"></small>
+        </div>
+      </div>
+
+      <div id="scrim" class="scrim"></div>
+
+      <aside id="inspector" class="inspector" aria-label="Detail panel">
+        <header class="inspector-head">
+          <h2 id="inspector-title">Devices</h2>
+          <button id="inspector-close" class="btn icon" aria-label="Close the detail panel">✕</button>
+        </header>
+
+        <div class="inspector-body">
+          <section id="devices-panel" class="panel" data-group="devices">
+            ${panelHead("Both devices")}
             ${peerRow("local", "This device")}
             <div class="wire" aria-hidden="true"><span></span><b>reliable · ordered</b><span></span></div>
             ${peerRow("remote", "Waiting for peer…")}
-          </div>
-        </section>
+          </section>
 
-        <section id="model-card" class="card model-card" hidden>
-          <div class="card-head">
-            <h2>Model</h2>
-            <span id="model-verdict" class="chip idle">sizing…</span>
-            ${cardToggle()}
-          </div>
-          <div class="card-body">
+          <section id="model-card" class="panel" data-group="model" hidden>
+            ${panelHead("Model", `<span id="model-verdict" class="chip idle">sizing…</span>`)}
             <label class="sr-only" for="model-select">Model</label>
             <select id="model-select" class="model-select"></select>
             <p id="model-summary" class="status-text" aria-live="polite">Reading model header…</p>
-          </div>
-        </section>
+          </section>
 
-        <section id="split-card" class="card split-card">
-          <div class="card-head">
-            <h2>Split</h2>
-            <div class="preset-group" role="group" aria-label="Layer split presets">
-              <button id="load-even" class="preset" type="button"
-                      title="Give each device the same number of layers">Even</button>
-              <button id="balance-split" class="preset" type="button"
-                      title="Give each device a similar download size">Balanced</button>
-              <button id="load-power" class="preset" type="button"
-                      title="Leave the tighter device the most memory headroom">Best fit</button>
-            </div>
-            ${cardToggle()}
-          </div>
-          <div class="card-body">
-            <div class="ribbon-wrap">
-              <div id="layer-ribbon" class="ribbon" role="slider" tabindex="0"
-                   aria-label="Transformer layer split point">
-                <div id="ribbon-cells" class="ribbon-cells"></div>
-                <div class="ribbon-handle" aria-hidden="true"></div>
-                <div class="ribbon-pulse" aria-hidden="true"></div>
-              </div>
-            </div>
-
+          <section id="split-panel" class="panel" data-group="model">
+            ${panelHead(
+              "Split",
+              `<div class="preset-group" role="group" aria-label="Layer split presets">
+                 <button id="load-even" class="preset" type="button"
+                         title="Give each device the same number of layers">Even</button>
+                 <button id="balance-split" class="preset" type="button"
+                         title="Give each device a similar download size">Balanced</button>
+                 <button id="load-power" class="preset" type="button"
+                         title="Leave the tighter device the most memory headXCLUSTERPLACEHOLDERX">Best fit</button>
+               </div>`,
+            )}
             <div class="workload">
               <div class="workload-head">
                 <span class="workload-label">Workload</span>
@@ -1065,83 +1339,79 @@ function shell(): string {
 
             <button id="assign-layers" class="btn primary wide">Assign &amp; load</button>
             <p id="split-hint" class="status-text" aria-live="polite"></p>
-          </div>
-        </section>
+          </section>
 
-        <section id="telemetry" class="card metrics" hidden>
-          <div class="metric-grid">
-            <div><b id="metric-tokens" class="mono">0</b><span>tokens</span></div>
-            <div><b id="metric-rate" class="mono">—</b><span>tok/s</span></div>
-            <div><b id="metric-elapsed" class="mono">—</b><span>elapsed</span></div>
-          </div>
-        </section>
-      </aside>
+          <section id="cache-card" class="panel" data-group="model" hidden>
+            ${panelHead("Weights", `<span id="cache-state" class="chip idle">checking…</span>`)}
+            <p id="cache-summary" class="status-text" aria-live="polite"></p>
+            <div class="cache-bar" role="img" aria-label="Share of this shard held in the cache">
+              <i id="cache-fill"></i>
+            </div>
+            <button id="clear-cache" class="btn ghost sm wide">Clear cached weights</button>
+          </section>
 
-      <section class="chat">
-        <div class="chat-head">
-          <div>
-            <p class="eyebrow">Distributed session</p>
-            <h2>Split model <span class="tag mono">P2P</span></h2>
-          </div>
-          <button id="reset-chat" class="btn ghost sm" disabled>Reset</button>
+          <section id="telemetry" class="panel" data-group="perf" hidden>
+            ${panelHead("This run", `<span id="metric-live" class="chip idle">idle</span>`)}
+            <div class="metric-hero">
+              <div class="stage-head">
+                <span class="stage-title">Throughput</span>
+                <b id="metric-spark-peak" class="mono">—</b>
+              </div>
+              <div class="hero-row">
+                <b id="metric-rate" class="hero-value mono">—</b>
+                <span class="hero-unit">tok/s</span>
+                <svg id="latency-spark" class="spark" viewBox="0 0 100 28"
+                     preserveAspectRatio="none" role="img"
+                     aria-label="Latency of each recent token">
+                  <path id="spark-area" class="spark-area" d=""></path>
+                  <path id="spark-line" class="spark-line" d=""></path>
+                </svg>
+              </div>
+            </div>
+
+            <div class="metric-tiles">
+              ${metricTile("metric-ttft", "First token", ICONS.clock, "—")}
+              ${metricTile("metric-tokens", "Tokens", ICONS.stack, "0")}
+              ${metricTile("metric-per-token", "Per token", ICONS.gauge, "—")}
+              ${metricTile("metric-bytes", "On the wire", ICONS.swap, "—", true)}
+            </div>
+
+            <div class="stage-block">
+              <div class="stage-head">
+                <span class="stage-title">Where a token's time goes</span>
+              </div>
+              <div id="stage-bar" class="stage-bar" role="img" aria-label="Stage breakdown">
+                ${["host", "wire", "worker", "head"]
+                  .map((stage) => `<i data-stage="${stage}"></i>`)
+                  .join("")}
+              </div>
+              <ul id="stage-legend" class="stage-legend">
+                ${stageLegendRow("host", "Host layers")}
+                ${stageLegendRow("wire", "Network")}
+                ${stageLegendRow("worker", "Peer layers")}
+                ${stageLegendRow("head", "Head + sample")}
+              </ul>
+            </div>
+
+            <dl class="wire-stats">
+              <div><dt>Sent · received</dt><dd id="metric-bytes-total" class="mono">—</dd></div>
+            </dl>
+          </section>
+
+          <section id="session-panel" class="panel" data-group="session">
+            ${panelHead("Cluster")}
+            <dl class="wire-stats">
+              <div><dt>Code</dt><dd id="session-code" class="mono">—</dd></div>
+            </dl>
+            <p class="status-text">
+              Signaling runs through PeerJS; every activation then travels directly
+              between the two browsers over WebRTC.
+            </p>
+            <button id="reset-chat" class="btn ghost sm wide" disabled>Reset conversation</button>
+            <button id="leave-cluster" class="btn ghost sm wide">Leave cluster</button>
+          </section>
         </div>
-
-        <section id="invite-panel" class="invite" hidden>
-          <h2 class="invite-title">Pair your phone</h2>
-          <p class="invite-sub">Scan this code with your phone's camera to join as the second device.</p>
-          <div id="qr-holder" class="qr"></div>
-          <p class="invite-url mono" id="invite-link"></p>
-          <div class="invite-actions">
-            <button id="share-link" class="btn sm" hidden>Share</button>
-          </div>
-        </section>
-
-        <div id="transcript" class="transcript" aria-live="polite"></div>
-
-        <form id="prompt-form" class="composer">
-          <div class="composer-box">
-            <textarea id="prompt-input" rows="1" placeholder="Waiting for both shards…"
-                      disabled spellcheck="true"></textarea>
-            <button id="send-button" type="submit" class="round send" aria-label="Send prompt">
-              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-                <path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor"
-                      stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
-            <button id="stop-generation" type="button" class="round stop" hidden aria-label="Stop generation">
-              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-                <rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/>
-              </svg>
-            </button>
-          </div>
-          <small id="composer-hint" class="hint"></small>
-        </form>
-      </section>
+      </aside>
     </div>
   </section>`;
-}
-
-function peerRow(prefix: string, fallback: string): string {
-  return `
-    <article class="peer">
-      <div class="peer-top">
-        <h3 id="${prefix}-name">${fallback}</h3>
-        <span id="${prefix}-phase" class="phase">connecting</span>
-      </div>
-      <p id="${prefix}-gpu" class="peer-gpu">Probing capabilities…</p>
-      <div class="peer-foot">
-        <span id="${prefix}-memory" class="mono">—</span>
-        <span id="${prefix}-percent" class="mono pct"></span>
-      </div>
-      <div class="peer-budget">
-        <label for="${prefix}-budget">Budget</label>
-        <input id="${prefix}-budget" class="budget-input mono" type="number"
-               min="0.25" step="0.25" inputmode="decimal" aria-describedby="${prefix}-budget-src">
-        <span class="budget-unit">GB</span>
-        <span id="${prefix}-budget-src" class="budget-src"></span>
-      </div>
-      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">
-        <i id="${prefix}-progress"></i>
-      </div>
-    </article>`;
 }

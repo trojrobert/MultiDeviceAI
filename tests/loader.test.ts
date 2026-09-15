@@ -52,7 +52,7 @@ function rangeServer(index: GGUFIndex) {
 test("the loader fetches every tensor its role owns, and no others", async () => {
   const index = buildGGUFIndex(SHAPE);
   const server = rangeServer(index);
-  const weights = await loadModelWeights(index, HOST, server.fetchFn);
+  const weights = await loadModelWeights(index, HOST, { fetchFn: server.fetchFn });
 
   assert.equal(weights.layers.length, 2);
   assert.ok(weights.embedding, "a host role owns the embedding table");
@@ -66,7 +66,7 @@ test("the loader fetches every tensor its role owns, and no others", async () =>
 test("a worker role never fetches the embedding, norm, or head", async () => {
   const index = buildGGUFIndex(SHAPE);
   const server = rangeServer(index);
-  const weights = await loadModelWeights(index, WORKER, server.fetchFn);
+  const weights = await loadModelWeights(index, WORKER, { fetchFn: server.fetchFn });
 
   assert.equal(weights.layers.length, 2);
   assert.equal(weights.embedding, undefined);
@@ -87,12 +87,12 @@ test("tensors are fetched concurrently, up to the configured limit", async () =>
   const index = buildGGUFIndex(SHAPE);
 
   const parallel = rangeServer(index);
-  await loadModelWeights(index, HOST, parallel.fetchFn, undefined, 4);
+  await loadModelWeights(index, HOST, { fetchFn: parallel.fetchFn, concurrency: 4 });
   assert.ok(parallel.peak() > 1, "the loader must overlap requests");
   assert.ok(parallel.peak() <= 4, `concurrency ${parallel.peak()} exceeded the limit of 4`);
 
   const serial = rangeServer(index);
-  await loadModelWeights(index, HOST, serial.fetchFn, undefined, 1);
+  await loadModelWeights(index, HOST, { fetchFn: serial.fetchFn, concurrency: 1 });
   assert.equal(serial.peak(), 1, "concurrency 1 must stay sequential");
 });
 
@@ -100,7 +100,10 @@ test("progress rises monotonically to exactly the shard size", async () => {
   const index = buildGGUFIndex(SHAPE);
   const server = rangeServer(index);
   const seen: LoadProgress[] = [];
-  await loadModelWeights(index, HOST, server.fetchFn, (progress) => seen.push({ ...progress }));
+  await loadModelWeights(index, HOST, {
+    fetchFn: server.fetchFn,
+    onProgress: (progress) => seen.push({ ...progress }),
+  });
 
   assert.equal(seen.length, shardTensorNames(index, HOST).length);
   for (let i = 1; i < seen.length; i++) {
@@ -115,8 +118,11 @@ test("an aborting progress callback stops the load", async () => {
   const index = buildGGUFIndex(SHAPE);
   const server = rangeServer(index);
   await assert.rejects(
-    loadModelWeights(index, HOST, server.fetchFn, () => {
-      throw new Error("aborted");
+    loadModelWeights(index, HOST, {
+      fetchFn: server.fetchFn,
+      onProgress: () => {
+        throw new Error("aborted");
+      },
     }),
     /aborted/,
   );

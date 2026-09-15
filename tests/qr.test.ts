@@ -23,7 +23,7 @@ test("short payloads produce a version 1 symbol", () => {
 });
 
 test("finder, timing and dark modules are placed correctly", () => {
-  const code = encodeQR("https://example.com/?room=ABC123");
+  const code = encodeQR("https://example.com/?cluster=ABC123");
   const { size, modules } = code;
   const at = (r: number, c: number) => modules[r * size + c];
 
@@ -53,7 +53,7 @@ test("payload length selects an appropriate version and stays scannable", () => 
 });
 
 test("both format-information copies agree and decode to level L", () => {
-  const code = encodeQR("https://example.com/?room=ZXCVB");
+  const code = encodeQR("https://example.com/?cluster=ZXCVB");
   const { size, modules } = code;
   const at = (r: number, c: number) => modules[r * size + c];
 
@@ -76,7 +76,7 @@ test("both format-information copies agree and decode to level L", () => {
 });
 
 test("symbols use a mix of dark and light modules", () => {
-  const code = encodeQR("https://multideviceai.example/?room=QWERTY");
+  const code = encodeQR("https://localclusterai.example/?cluster=QWERTY");
   let dark = 0;
   for (const module of code.modules) dark += module;
   const ratio = dark / code.modules.length;
@@ -210,11 +210,11 @@ function decodeQR(code: { version: number; size: number; modules: Uint8Array }):
 
 test("encoded symbols decode back to the original payload", () => {
   const payloads = [
-    "room",
+    "cluster",
     "HELLO WORLD",
-    "https://example.com/?room=ABC123",
-    "https://dist-l91bcjgzm-trojroberts-projects.vercel.app/?room=QWERTY",
-    "https://multideviceai.example.com/invite?room=ZXCVBN&host=laptop&v=1",
+    "https://example.com/?cluster=ABC123",
+    "https://dist-l91bcjgzm-trojroberts-projects.vercel.app/?cluster=QWERTY",
+    "https://localclusterai.example.com/invite?cluster=ZXCVBN&host=laptop&v=1",
   ];
   for (const payload of payloads) {
     const code = encodeQR(payload);
@@ -224,7 +224,7 @@ test("encoded symbols decode back to the original payload", () => {
 });
 
 test("SVG rendering covers the module grid with a quiet zone", () => {
-  const code = encodeQR("room");
+  const code = encodeQR("cluster");
   const svg = qrToSvg(code, 2);
   assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
   assert.match(svg, new RegExp(`viewBox="0 0 ${code.size + 4} ${code.size + 4}"`));
