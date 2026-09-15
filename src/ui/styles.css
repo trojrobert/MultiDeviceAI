@@ -1064,7 +1064,7 @@ button:disabled { cursor: not-allowed; }
 /* ── Devices ──────────────────────────────────────────────────────────────*/
 .peer { padding: 12px 14px; }
 .peer-top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-/* The ring overflows the sphere, so the orb reserves XCLUSTERPLACEHOLDERX for it. */
+/* The ring overflows the sphere, so the orb reserves room for it. */
 .peer-top .orb { --orb-size: 20px; margin: 0 8px 0 5px; }
 .peer-foot, .peer-budget, .peer .bar { margin-left: 38px; }
 .peer-top h4 {

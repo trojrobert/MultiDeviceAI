@@ -119,7 +119,7 @@ enabled). Then:
    exposes no real VRAM figure, so correct it if a load fails.
 5. **Laptop:** choose a split (`14` means laptop layers 0–13 and phone layers
    14–27) and click **Assign & load**. **By device power** picks the split with
-   the most headXCLUSTERPLACEHOLDERX on the tighter device; **Balance** evens out the two
+   the most headroom on the tighter device; **Balance** evens out the two
    downloads. A split that does not fit is refused, and the button says which
    device is short.
 6. Each peer range-downloads only its assigned Qwen tensors. For 0.6B at a 14/14
@@ -172,7 +172,7 @@ Keying on the byte range means a re-published GGUF that moves a tensor misses
 rather than returning the wrong bytes, and the loader re-checks every entry's
 length before use, so a truncated or partially evicted entry is re-fetched
 rather than handed to the engine. The app asks for persistent storage so a
-shard is not evicted because a background tab needed XCLUSTERPLACEHOLDERX.
+shard is not evicted because a background tab needed room.
 
 Caching degrades quietly rather than failing: an insecure origin, private
 browsing, or a full quota all just mean tensors are fetched as before. The

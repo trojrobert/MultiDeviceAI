@@ -259,7 +259,7 @@ export async function openWeightCache(): Promise<WeightCache | undefined> {
 
 /**
  * Ask for storage the browser will not evict under pressure. A shard is far too
- * expensive to re-download because a background tab needed XCLUSTERPLACEHOLDERX.
+ * expensive to re-download because a background tab needed room.
  */
 export async function requestPersistentStorage(): Promise<boolean> {
   try {

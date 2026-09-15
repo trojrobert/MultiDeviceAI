@@ -75,7 +75,7 @@ export class QwenRuntimeAdapter implements DistributedEngine {
       this.weightCacheOpened = true;
       this.weightCache = await openWeightCache();
       // A shard is far too expensive to lose because a background tab needed
-      // XCLUSTERPLACEHOLDERX, so ask for storage the browser will not evict.
+      // room, so ask for storage the browser will not evict.
       if (this.weightCache) this.persisted = await requestPersistentStorage();
     }
     return this.weightCache;

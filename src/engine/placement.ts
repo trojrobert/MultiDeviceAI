@@ -20,7 +20,7 @@ export interface SplitCandidate {
   workerDownloadBytes: number;
   hostFits: boolean;
   workerFits: boolean;
-  /** Smaller of the two sides' remaining headXCLUSTERPLACEHOLDERX, as a fraction of budget. Negative when a side overflows. */
+  /** Smaller of the two sides' remaining headroom, as a fraction of budget. Negative when a side overflows. */
   minSlack: number;
 }
 
@@ -89,7 +89,7 @@ export function planPlacement(input: PlacementInput): PlacementResult {
 
   const feasible = candidates.filter((candidate) => candidate.hostFits && candidate.workerFits);
 
-  // Maximise the tighter side's headXCLUSTERPLACEHOLDERX rather than pushing one device to its
+  // Maximise the tighter side's headroom rather than pushing one device to its
   // ceiling: these budgets are estimates, and the split that only just fits is
   // exactly where a bad estimate costs a lost WebGPU device mid-load.
   const recommended = feasible.reduce<SplitCandidate | undefined>((best, candidate) => {

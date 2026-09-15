@@ -1304,7 +1304,7 @@ function shell(): string {
                  <button id="balance-split" class="preset" type="button"
                          title="Give each device a similar download size">Balanced</button>
                  <button id="load-power" class="preset" type="button"
-                         title="Leave the tighter device the most memory headXCLUSTERPLACEHOLDERX">Best fit</button>
+                         title="Leave the tighter device the most memory headroom">Best fit</button>
                </div>`,
             )}
             <div class="workload">

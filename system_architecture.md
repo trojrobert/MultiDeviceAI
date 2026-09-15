@@ -122,7 +122,7 @@ which fits in neither browser alone.
 Placement is computed, not guessed. Each device reports a memory budget, and for
 every legal split the host estimates both roles' footprints and reports one of
 three verdicts: the model fits on one device, it needs both, or it fits neither.
-The recommended split maximises the tighter device's headXCLUSTERPLACEHOLDERX rather than
+The recommended split maximises the tighter device's headroom rather than
 filling one device to its ceiling, since these budgets are estimates.
 
 The browser exposes no real VRAM figure. `maxBufferSize` is a per-allocation

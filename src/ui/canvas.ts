@@ -49,7 +49,7 @@ const WORKER_CX = 830;
 const DIV_MIN = 300;
 const DIV_MAX = 700;
 /**
- * Vertical XCLUSTERPLACEHOLDERX a fan may spread into, and the widest gap between filaments.
+ * Vertical room a fan may spread into, and the widest gap between filaments.
  * The span is bounded well inside the flow arcs so a 36-layer fan never
  * reaches the arcs or their labels.
  */
